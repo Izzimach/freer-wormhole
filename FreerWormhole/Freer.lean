@@ -21,228 +21,357 @@ inductive OU : List Effect.{u} → Type u → Type (u+1) where
 
 class HasEffect (e : Effect) (effs : List Effect) where
     inject : (c : e.op) → OU effs (e.ret c)
+    project : OU effs a → Option e.op
 
 instance : HasEffect e (e :: effs) where
     inject := fun c => @OU.Leaf e effs c
+    project := fun ou => match ou with
+                         | .Leaf c => Option.some c
+                         | .Node ou' => Option.none
 
 instance [HasEffect e effs] : HasEffect e (z :: effs) where
     inject := fun x => OU.Node (@HasEffect.inject e effs _ x)
+    project := fun ou => match ou with
+                         | .Leaf c => Option.none
+                         | .Node ou' => HasEffect.project ou'
 
+def decompOU {e : Effect} {effs : List Effect} (ou : OU (e :: effs) x) : Sum (OU effs x) (e.op) :=
+    match ou with
+    | .Leaf x => Sum.inr x
+    | .Node ou' => Sum.inl ou'                
 
+inductive Freer (effs : List Effect.{u}) : Type u → Type (u+1) where
+    | Pure : a → Freer effs a
+    | Impure : {x : Type u} → OU effs x → (x → Freer effs a) → Freer effs a
 
-inductive EffWA.{u} (effs : List Effect.{u}) (α : Type u) : Type (u+1) where
-    | Pure : α → EffWA effs α 
-    | Impure : (x : Type u) → OU effs x → EffWA effs α -- the (x → W ..) part is in the second part of the pfunctor (EffWB)
+-- lift into Freer
+def send.{u} {g : Effect.{u}} {effs : List Effect.{u}} [HasEffect g effs] (ga : g.op) : Freer effs (g.ret ga) :=
+    @Freer.Impure effs (g.ret ga) _ (HasEffect.inject ga) .Pure
 
+def weaken.{u} {g : Effect.{u}} {effs : List Effect.{u}} : Freer effs a → Freer (g :: effs) a
+| .Pure a => .Pure a
+| .Impure ou next => .Impure (OU.Node ou) (fun x => weaken (next x))
 
-def EffWB.{u} {effs : List Effect.{u}} {α : Type u} : EffWA effs α → Type (u+1)
-    | .Pure a      => ULift <| Fin 0 -- can't use False since we need a Type here, not a Prop
-    | .Impure x gx => ULift.{u+1,u} x
+def FreerAlg.{u} (effs : List Effect.{u}) (a : Type v) := {x : Type u} → (OU effs x) → (x → a) → a
 
-def EffWPF.{u} (effs : List Effect) (α : Type u) : pfunctor.{u+1,u+1} := pfunctor.mk (EffWA.{u} effs α) EffWB.{u}
+def freerCata {a : Type (u+1)} (alg : FreerAlg effs a) (w : Freer effs a) : a :=
+    match w with
+    | .Pure a => a
+    | .Impure gx next => alg gx (fun x => freerCata alg (next x))
 
-structure EffW.{u} (effs : List Effect.{u}) (a : Type u) : Type (u+1) where
-   val : W (EffWPF.{u} effs a)
+def freerMap {a b : Type u} (f : a → b) (w : Freer effs a) : Freer effs b :=
+    match w with
+    | .Pure a => .Pure (f a)
+    | .Impure gx next => .Impure gx (fun x => freerMap f (next x))
 
+instance : Functor (Freer effs) :=
+    { map := freerMap }
 
--- lift into EffW
-def sendEffW.{u} {g : Effect.{u}} {effs : List Effect.{u}} [HasEffect g effs] (ga : g.op) : EffW effs (g.ret ga) :=
-    EffW.mk <| ⟨EffWA.Impure (g.ret ga) (HasEffect.inject ga), fun a => W.mk ⟨EffWA.Pure <| ULift.down a, Fin.elim0 ∘ ULift.down⟩⟩
+-- foldOver is basically freerCata + freerMap
+def foldOver {a : Type u} {b : Type v} {effs : List Effect.{u}} (pf : a → b) (alg : FreerAlg effs b) : Freer effs a → b
+    | .Pure a => pf a
+    | @Freer.Impure _ a _ gx next => alg gx (fun x => @foldOver a b effs pf alg (next x))
+    
 
-
-
-def EffWAlg.{u} (effs : List Effect.{u}) (a : Type (u+1)) := {x : Type u} → (c : OU effs x) → (x → a) → a
-
-/-
--- "normal" bind for EffW using structural recursion
-
-def bindRawW {effs : List Effect} {α β : Type} : W (EffWPF effs α) → (α → W (EffWPF effs β)) → W (EffWPF effs β) := fun m1 m2 =>
-    match m1 with
-    | ⟨EffWA.Pure a,     _⟩ => m2 a
-    | ⟨EffWA.Impure x ou, bx⟩ => W.mk ⟨EffWA.Impure x ou, fun x => (@bindRawW effs α β (bx x) m2)⟩
-
-def bindEffW {α β : Type} : EffW g α → (α → EffW g β) → EffW g β := fun m1 m2 =>
-    -- we just strip off the FreerIxW wrapper and recurse
-    EffW.mk <| bindRawW m1.val (fun x => (m2 x).val)
--/
 
 /-
 -- alternate implementation of bind using a fold, similar to the "Hefty Algebras" paper
 --
--- ugh, so much universe manipulation
 -/
-def foldOver.{u} {a : Type u} {b : Type (u+1)} {effs : List Effect.{u}} (pf : a → b) (alg : EffWAlg effs b) (w : EffW effs a) : b :=
-    let walg : (Σ (x : EffWA effs a), (@EffWB effs a) x → b) → b := fun d =>
-        match d with
-        | ⟨EffWA.Pure a, z⟩ => pf a
-        | ⟨EffWA.Impure x gx, next⟩ => @alg x gx (fun z => next (ULift.up.{u+1,u} z))
-    let wpf := EffWPF.{u} effs a
-    let v : W_type wpf.B := w.val
-    @W_type.elim.{u+1,u+1} wpf.A wpf.B _ walg v
-    --W_type.elim.{u+1} walg v
+def bindFreer {effs : List Effect.{u}} (m : Freer effs a) (f : a → Freer effs b) : Freer effs b :=
+    @foldOver a (Freer effs b) effs f .Impure m
+
+def pureFreer {α : Type} (a : α) : Freer effs α := Freer.Pure a
 
 
-def bindEffW {effs : List Effect.{u}} (m : EffW effs a) (f : a → EffW effs b) : EffW effs b :=
-    let bindAlg {x : Type u} : OU effs x → (x → EffW effs b)  → EffW effs b :=
-        fun ou next => EffW.mk ⟨EffWA.Impure _ ou, fun v => EffW.val <| next (ULift.down.{u+1,u} v)⟩
-    @foldOver a (EffW effs b) effs f bindAlg m
+instance : Monad (Freer effs) where
+    pure := pureFreer
+    bind := bindFreer
 
 
--- pure for EffW
-def pureEffW {α : Type} (a : α) : EffW effs α := EffW.mk ⟨EffWA.Pure a, Fin.elim0 ∘ ULift.down⟩
-
-
-instance : Monad (EffW effs) where
-    pure := pureEffW
-    bind := bindEffW
-
---
--- EffW as a Functor
---
-
-def EffWMap (f : α → β) (w : EffW effs α) : EffW effs β :=
-    let Walg := fun d =>
-        match d with
-        | ⟨EffWA.Pure a, z⟩         => W.mk ⟨EffWA.Pure (f a), z⟩
-        | ⟨EffWA.Impure x gx, next⟩ => W.mk ⟨EffWA.Impure x gx, next⟩
-    EffW.mk <| W_type.elim Walg w.val
-
-instance : Functor (EffW effs) :=
-    { map := EffWMap }
-
-
+-- Handler is the handler for a specific effect: ret is for Pure constructors
+-- and handle is for impure constructors. The result has an 'inp' type so that the  monad can
+-- take inputs (a state monad for example). You can make inp Unit for no input.
+--  - a is the type returned from a Pure
+--  - b is the monad result type. It may be that a=b but not always.
 structure Handler (a b : Type u) (e : Effect.{u}) (effs : List Effect.{u}) (inp : Type u) where
-   (ret : a → inp → EffW effs b)
-   (handle : EffWAlg (e :: effs) (inp → EffW effs b))
+   (ret : a → inp → Freer effs b)
+   (handle : FreerAlg (e :: effs) (inp → Freer effs b))
 
 -- Interpret a Freer monad. You must provide an "interpreter" which takes commands of type c
 -- and produces monads of the final type n.  This runs the interpreter on a command
 -- in the Impure constructor and combines it with the next chunk of the Freer monad
 -- by using a definition of bind for the final monad n.
-def handleEffW {a b : Type u} {e : Effect} {effs : List Effect} {inp : Type u} 
-    (handler : Handler a b e effs inp) (m : EffW (e :: effs) a) : inp → EffW effs b :=
+def handleFreer {a b : Type u} {e : Effect} {effs : List Effect} {inp : Type u} 
+    (handler : Handler a b e effs inp) (m : Freer (e :: effs) a) : inp → Freer effs b :=
     foldOver handler.ret handler.handle m
 
+
+
+def NilEffect.{u} : Effect.{u} :=
+    {
+        -- we use Fin 0 as a stand-in for bottom
+        op := ULift <| Fin 0,
+        ret := fun _ => ULift <| Fin 0
+    }
+
+def NilHandler : Handler.{u} a a NilEffect effs PUnit :=
+    {
+        ret := fun a _ => .Pure a,
+        handle := fun ou next s =>
+            match ou with
+            | .Leaf l => Fin.elim0 (ULift.down l)
+            | .Node ou' => .Impure ou' (fun x => next x s)
+    }
+
+def runEff : Freer [] a → a
+    | .Pure x => x
+    -- shouldn't ever have an Impure constructed
+    --| .Impure ou next => match ou with | .Leaf c => Fin.elim0 (ULift.down c)
 
 --
 -- higher-order effects
 --
 
-structure HEffect : Type (u+1) where
+structure HEffect.{u} : Type (u+1) where
     (cmd : Type u)
     (fork : cmd  → Effect.{u})
-    (ret : cmd → Type u)
+    (retH : cmd → Type u)
 
 
---inductive Hefty : List HEffect → List HEffect → Type u → Type (u+1) where
---| Pure : a → Hefty h h a
---| Impure : OUH h h x → (x → Hefty h h a) → Hefty h h a
-
--- OUH needs two HEffect lists: one tracks the effs that can be witnessed, and gradually
--- gets shorted as we walk through .Node constructors. The second list tracks the type of the
--- HEffect list that gets returned from the fork functions. This second list is the "original" row
--- o HEffects and does not get shorted as we walk down the .Node constructors. The two lists
--- should be equal when referenced in a Hefty.Impure constructor.
-inductive HOU.{u} : List HEffect → (cmd : Type u) → Effect.{u} → Type (u+1) where
-    | Leaf : (c : heff.cmd) → HOU (heff :: heffs) (heff.ret c) (heff.fork c)
-    | Node : HOU heffs c heff → HOU (_ :: heffs) c heff
+-- Choose one HEffect from a list of them.
+inductive HOU.{u} : List HEffect → (ret : Type u) → Effect.{u} → Type (u+1) where
+    | Leaf : (c : heff.cmd) → HOU (heff :: heffs) (heff.retH c) (heff.fork c)
+    | Node : HOU heffs c fork → HOU (_ :: heffs) c fork
 
 
-inductive HEffWA.{u} (heffs : List HEffect.{u}) (α : Type u) : Type (u+1) where
-    | Pure : α → HEffWA heffs α 
-    | Impure : {heff : HEffect} → (x : Type u) → HOU effs heff → HEffWA heffs α -- the (x → W ..) part is in the second part of the pfunctor (EffWB)
+inductive Hefty.{u} : List HEffect.{u} → Type u → Type (u+2) where
+| Pure {a : Type u} : a → Hefty h a
+| Impure {x : Type u} {e : Effect.{u}} : HOU h x e → ((c : e.op) → Hefty h (e.ret c)) → (x → Hefty h a) → Hefty h a
 
+class HasHEffect (h : HEffect) (heffs : List HEffect) where
+    inject : (c : h.cmd) → HOU heffs (h.retH c) (h.fork c)
 
-def HEffWB.{u} {heffs : List HEffect.{u}} {α : Type u} : HEffWA heffs α → Type (u+1)
-    | .Pure a      => ULift <| Fin 0 -- can't use False since we need a Type here, not a Prop
-    | @HEffWA.Impure _ _ _ heff x hou => ULift.{u+1,u} x
+instance : HasHEffect h (h :: heffs) where
+    inject := fun c => @HOU.Leaf h heffs c
 
-def HEffWPF.{u} (heffs : List HEffect) (α : Type u) : pfunctor.{u+1,u+1} := pfunctor.mk (HEffWA.{u} heffs α) HEffWB.{u}
+instance [HasHEffect h heffs] : HasHEffect h (z :: heffs) where
+    inject := fun c => HOU.Node (@HasHEffect.inject h heffs _ c)
 
-structure HEffW.{u} (heffs : List HEffect.{u}) (a : Type u) : Type (u+1) where
-   val : W (HEffWPF.{u} heffs a)
-
-
-
-((a : (heff.fork c).op) → Hefty alleffs alleffs ((heff.fork c).ret a)) → 
-
-inductive Hefty2 (alleffs : List HEffect) : List HEffect → Type u → Type (u+2) where
-| Pure : a → Hefty2 alleffs alleffs a
-| Leaf : (heff : HEffect) → (c : heff.cmd) → ((a : (heff.fork c).op) → Hefty2 alleffs alleffs ((heff.fork c).ret a)) → (heff.ret c → Hefty2 alleffs (heff :: heffs) (heff.ret c)) → Hefty2 alleffs (heff :: heffs) (heff.ret c)
-| Node : Hefty2 alleffs heffs a → Hefty2 alleffs (heff :: heffs) a
-
-
-class HasHEffect (h : HEffect) (heffs : List HEffect) (alleffs : List HEffect) where
-    inject : (c : h.cmd) → ((a : (h.fork c).op) → Hefty alleffs alleffs ((h.fork c).ret a)) → OUH heffs alleffs (h.ret c)
-
-instance : HasHEffect h (h :: heffs) alleffs where
-    inject := fun c k => @OUH.Leaf alleffs h heffs c k
-
-instance [HasHEffect h heffs alleffs] : HasHEffect h (z :: heffs) alleffs where
-    inject := fun c k => OUH.Node (@HasHEffect.inject h heffs alleffs _ c k)
-
-#check WellFounded
-
-def HeftyAlg (heffs : List HEffect) (a : Type u) := {x : Type u} → (c : OUH heffs heffs x) → (x → a) → a
-
-def Hefty2Alg (a : Type u) := (heff : HEffect) → (c : heff.cmd) → (heff.ret c → a) → a
-
-def hFold2 {a : Type u} {b : Type u} {heffs alleffs : List HEffect} (pf : a → b) (alg : Hefty2Alg b) : Hefty2 alleffs heffs a → b
-| .Pure a => pf a
-| @Hefty2.Leaf _ heff _ cx fo k => alg _ cx (fun x => hFold2 pf alg (k x))
-| Hefty2.Node h' => hFold2 pf alg h'
-    termination_by hFold2 p a h => h
+def decompHOU {eff : Effect} {heff : HEffect} {heffs : List HEffect} (hou : HOU (heff :: heffs) x eff) : Sum (HOU heffs x eff) heff.cmd :=
+    match hou with
+    | .Leaf c => Sum.inr c
+    | .Node hou' => Sum.inl hou'
 
 
 def hPure (val : a) : Hefty h a := .Pure val
 
-def freerBind (m : Freer effs a) (f : a → Freer effs b) : Freer effs b := @foldOver a (Freer effs b) effs f .Impure m
 def hBind (m : Hefty h a) (f : a → Hefty h b) : Hefty h b :=
     match m with
     | .Pure a => f a
-    | .Impure ou next => .Impure ou (fun x => hBind (next x) f)
+    | .Impure ou psi next => .Impure ou psi (fun x => hBind (next x) f)
 
-def hLifted (eff : Type u → Type u) : HEffect := HEffect.mk eff (fun z c => Id) (fun z e => z)
+instance : Monad (Hefty effs) where
+    pure := hPure
+    bind := hBind
 
-def hLift {eff : Type u → Type u} {a : Type u} (f : Freer eff a ) : Hefty (hLifted eff) a :=
-    match f with
-    | .Pure a => hPure a
-    | .Impure cz next => @Hefty.Impure (hLifted eff) a _ cz (fun x v => hPure v) (fun z => hLift (next z))
+def hLifted (eff : Effect.{u}) : HEffect := 
+    {
+        cmd := eff.op,
+        fork := fun _ => NilEffect.{u},
+        retH := eff.ret
+    }
+
+def hLift {eff : Effect} [HasHEffect (hLifted eff) heffs] (c : eff.op) : Hefty heffs (eff.ret c) :=
+    -- yikes
+    @Hefty.Impure heffs _ (eff.ret c) NilEffect (@HasHEffect.inject (hLifted eff) heffs _ c) (fun f0 => Fin.elim0 (ULift.down f0)) hPure
 
 
-inductive CatchOp (a : Type u) : Type (u) where
-| Catch : CatchOp a
+def HeftyAlg (heffs : List HEffect) (a : Type u) := {x : Type u} → {e : Effect} → (c : HOU heffs x e) → (x → a) → a
 
-inductive ThrowEff : Type u → Type u where
-| Throw : ThrowEff a
 
-inductive ExceptResult (a : Type u) : Type u where
-| Success : ExceptResult a
-| Failure : ExceptResult a
+inductive ThrowOp : Type u where
+| Throw : String → ThrowOp
 
-def CatchHEff : HEffect := HEffect.mk CatchOp (fun z op => ExceptResult) (fun z e => z)
+def ThrowEff : Effect.{u} :=
+    {
+        op := ThrowOp,
+        ret := fun _ => ULift <| Fin 0
+    }
 
-def hCatch (m : (x : Type) → Hefty CatchHEff x) (err : (x : Type) → Hefty CatchHEff x) : Hefty CatchHEff a :=
-    @Hefty.Impure CatchHEff a _ (@CatchOp.Catch a)
-             (fun x fork => match fork with
-                            | .Success => m x
-                            | .Failure => err x)
-             (fun z => hPure z)
+def throwHandler : Handler a (Option a) ThrowEff effs Unit := 
+    {
+        ret := fun a () => Freer.Pure (Option.some a),
+        handle := fun ou next () => match ou with
+                                    | .Leaf z => match z with | .Throw err => Freer.Pure Option.none
+                                    | .Node ou' => Freer.Impure ou' (fun x => next x ())
+    }
+
+def throwH {heffs : List HEffect} [HasHEffect (hLifted ThrowEff) heffs] : Hefty heffs PUnit :=
+    hBind (@hLift _ ThrowEff _ (ThrowOp.Throw "argh"))
+          (fun _ => hPure ())
+
+-- "Universe-of-Types" basically mapping from values in one type to types in that same universe
+structure UoT : Type (u+1) where
+    (val : Type u)
+    (toT : val → Type u)
+
+def onlyRet (a : Type u) : UoT.{u} :=
+    {
+        val := PUnit,
+        toT := fun _ => a
+    }
+
+inductive CatchOp.{u} (uni : UoT.{u}) : Type (u) where
+| Catch : uni.val → CatchOp uni
+
+inductive ExceptResult : Type u where
+| Success : ExceptResult
+| Failure : ExceptResult
+
+def CatchFork (a : Type u) : Effect.{u} :=
+    {
+        -- possible values to pass to the fork, to choose which fork
+        op := ExceptResult,
+        -- return type from various forks, these can be different or the same
+        ret := fun z => match z with
+                        | .Success => a   -- success returns catch result
+                        | .Failure => a
+    }
+
+def CatchHEff.{u} (uni : UoT.{u}) : HEffect.{u} :=
+    {
+        cmd := CatchOp uni,
+        fork := fun e => CatchFork (uni.toT e.1),
+        retH := fun e => (uni.toT e.1)
+    }
+
+def catchHUnit {heffs : List HEffect} [HasHEffect (CatchHEff (onlyRet Unit)) heffs] 
+      (run : Hefty heffs Unit)
+      (onError : Hefty heffs Unit) : Hefty heffs Unit :=
+    Hefty.Impure
+        (@HasHEffect.inject (CatchHEff (onlyRet Unit)) heffs _ (CatchOp.Catch ()))
+        (fun pz => match pz with
+                   | .Success => run
+                   | .Failure => onError)
+        (fun z => hPure ())
 
 -- an algebra for Hefty h a
-def algH (h : HEffect) (f : Type u → Type (u+1)) : Type (u+1):=
-    {a : Type u} → {z : Type u} → (op : h.cmd z) → (∀x, h.fork z op x → f x) → (h.ret z op → f a) → f a
+def algH.{u} (heffs : List HEffect.{u}) (f : Type u → Type (u+1)) : Type (u+1) :=
+    {x a : Type u} → {e : Effect.{u}} → (c : HOU heffs x e) → ((s : e.op) → f ((e.ret s))) → (x → f a) → f a
 
-def cataH (pf : {x : Type} → x → f x) (alg : algH h f) (t : Hefty h a) : f a :=
+def cataH.{u} {heffs : List HEffect.{u}} {a : Type u} {f : Type u → Type (u+1)} (pf : {x : Type u} → x → f x) (alg : algH heffs f) (t : Hefty heffs a) : f a :=
     match t with
     | Hefty.Pure x => pf x
-    | Hefty.Impure c k next => alg c (fun x g => cataH pf alg (k x g)) (fun x => cataH pf alg (next x))
+    | Hefty.Impure ou psi next => alg ou (fun x => cataH pf alg (psi x)) (fun x => cataH pf alg (next x))
 
-def Elaboration (h : HEffect) (eff : Type u → Type u) : Type (u+1) := algH h (Freer eff)
 
-def elaborate (e : Elaboration h eff) (h : Hefty h a) : Freer eff a := cataH Freer.Pure e h
+def Elaboration (heffs : List HEffect) (effs : List Effect) : Type (u+1) := algH heffs (Freer effs)
 
-def eCatch [HasEffect ThrowEff eff] : Elaboration CatchHEff eff := fun op phi next => match op with
-    | .Catch => _ >>= next
+def elaborate (e : Elaboration heffs eff) (h : Hefty heffs a) : Freer eff a := cataH Freer.Pure e h
 
-end Freer
+-- Elaboration eloborations a whole list of HEffects into a Freer of effects.
+-- Elab1 adds elaboration for a single HEffect onto an Elaboration. You can use this to build
+-- up an Elaboration by chaining of several Elab1 terms.
+def Elab1 (heff : HEffect) (heffs : List HEffect) (effs : List Effect) : Type (u+1) := Elaboration heffs effs → Elaboration (heff :: heffs) effs
+
+/-def hCatch (e : Type u) (m : (x : Type u) → Hefty [CatchHEff e] x) (err : (x : Type u) → Hefty [CatchHEff e] x) : Hefty [CatchHEff e] a :=
+    @Hefty.Impure [CatchHEff Nat] a _ (@CatchOp.Catch a)
+             (fun x fork => match fork with
+                            | .Success a => m x
+                            | .Failure err => err x)
+             (fun z => hPure z)-/
+
+inductive StateOp (a : Type u) : Type u where
+| Put : a → StateOp a 
+| Get : StateOp a
+
+def StateEff (a : Type u) : Effect :=
+    {
+        op := StateOp a,
+        ret := fun op => match op with
+                         | .Put _ => PUnit
+                         | .Get   => a
+    }
+
+def stateHandler {s : Type u} : Handler.{u} a (a × s) (StateEff s) effs s :=
+    {
+        ret := fun a s => Freer.Pure ⟨a,s⟩,
+        handle := fun ou next s =>
+            match ou with
+            | .Leaf l => match l with
+                         | .Put x => next PUnit.unit x
+                         | .Get   => next s s
+            | .Node ou' => .Impure ou' (fun x => next x s)
+    }
+
+def get {s : Type u} {effs : List Effect} [HasEffect (StateEff s) effs] : Freer effs ((StateEff s).ret StateOp.Get) :=
+    @send (StateEff s) effs _ StateOp.Get
+
+def getH { s : Type u} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] : Hefty heffs s :=
+    @hLift _ (StateEff s) _ StateOp.Get
+
+def put {s : Type u} {effs : List Effect} [HasEffect (StateEff s) effs] (x : s) : Freer effs ((StateEff s).ret (StateOp.Put x)) :=
+    @send (StateEff s) effs _ (StateOp.Put x)
+
+def putH {s : Type u} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] (x : s) : Hefty heffs PUnit :=
+    @hLift _ (StateEff s) _ (StateOp.Put x)
+
+def eCatch : Elaboration [CatchHEff (onlyRet Nat)] (ThrowEff :: effs) :=
+    fun op phi next => match op with
+                       | .Leaf c => match c with
+                                    | .Catch v => let m₁ := phi .Success
+                                                  let m₂ := phi .Failure
+                                                  let r₁ := handleFreer throwHandler m₁
+                                                  let r₂ := fun (z : Option _) => match z with
+                                                                     | Option.none => bindFreer m₂ next
+                                                                     | Option.some x => next x
+                                                  (weaken (r₁ ())) >>= r₂
+
+
+def eCatch1 : Elab1 (CatchHEff (onlyRet Unit)) heffs (ThrowEff :: effs) :=
+    fun elab0 =>
+        fun op phi next => match op with
+                           | .Leaf c => match c with
+                                        | .Catch v =>
+                                                  let m₁ := phi .Success
+                                                  let m₂ := phi .Failure
+                                                  let r₁ := handleFreer throwHandler m₁
+                                                  let r₂ := fun (z : Option _) => match z with
+                                                                     | Option.none => bindFreer m₂ next
+                                                                     | Option.some x => next x
+                                                  (weaken (r₁ ())) >>= r₂
+                           | .Node hou' => elab0 hou' phi next
+
+def eLift (eff : Effect) [HasEffect eff effs] : Elab1 (hLifted eff) heffs effs :=
+    fun elab0 => 
+        fun op phi next => match op with
+                           | .Leaf c => Freer.Impure (HasEffect.inject c) next
+                           | .Node hou' => elab0 hou' phi next
+
+-- a higher-order effect that should not be able to be constructed, used to terminate
+-- Heff elaboration
+def eNil : Elaboration [hLifted NilEffect] effs :=
+    fun c phi next => match c with
+                      | .Leaf x => Fin.elim0 (ULift.down x)
+    
+
+def transact
+    [HasHEffect (hLifted (StateEff Nat)) heffs]
+    [HasHEffect (hLifted ThrowEff) heffs]
+    [HasHEffect (CatchHEff (onlyRet Unit)) heffs]
+      : Hefty heffs Nat := do
+    putH 1
+    catchHUnit (do throwH; putH 2) (pure ())
+    getH
+
+def elabTransact : Elaboration [ CatchHEff (onlyRet Unit), hLifted ThrowEff, hLifted (StateEff Nat), hLifted NilEffect]
+                               [ ThrowEff, StateEff Nat] :=
+    eCatch1 <| (eLift ThrowEff) <| (eLift (StateEff Nat)) <| @eNil [ThrowEff, StateEff Nat]
+
+def runTransact : Freer [ThrowEff, StateEff Nat] a → (Option a × Nat) :=
+    let h1 := fun m => handleFreer throwHandler m ()
+    let h2 := fun m => handleFreer stateHandler m (3 : Nat)
+    fun m => runEff <| h2 <| h1 m
+
+#eval runTransact (elaborate elabTransact transact)
