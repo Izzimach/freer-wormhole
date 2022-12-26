@@ -1,0 +1,10 @@
+{"version": 2,
+ "packages":
+ [{"url": "https://github.com/yatima-inc/LSpec.git",
+   "rev": "eec03698651fa371764a90d6af0fcbd96cf4bb57",
+   "name": "LSpec",
+   "inputRev": "eec03698651fa371764a90d6af0fcbd96cf4bb57"},
+  {"url": "https://gitlab.com/Izzimach/solifugid-z",
+   "rev": "3634b3735243332dbd65d7313a2a11ec3ae56d5b",
+   "name": "solifugid-z",
+   "inputRev": "3634b3735243332dbd65d7313a2a11ec3ae56d5b"}]}
