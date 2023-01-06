@@ -2,12 +2,13 @@
 
 import Lean
 
-import FreerWormhole.Freer
+import FreerWormhole.Effects.Freer
+import FreerWormhole.Effects.StdEffs
 import FreerWormhole.Wormhole
-import FreerWormhole.SumMacro
 
 open Lean Elab Command Term
-open Freer Wormhole
+
+open Freer Effect Wormhole
 
 
 
@@ -100,14 +101,21 @@ def tx : TermElabM (List (Expr × Expr)) := do
     List.mapM runProd tm
 
 -- final monad implementing the state and IO
-mkSumType ExampleCommand >| IO, Id |<
 genWormholeSend freerSkel $: Lean.mkConst ``String >: skeletonTransformers ``String :< tx :$    
 
-def getNat [HasEffect Id m] : Freer m Nat := @HasEffect.send Id m _ Nat <| pure 3
+def getNat [HasEffect NoopEffect m] : Freer m (ULift Nat) := do noop; pure (ULift.up 3)
 
-def dumpArgh [HasEffect IO m] : Freer m Nat := do HasEffect.send <| IO.println "argh"; pure 4
+def dumpArgh.{u} [HasEffect IOEffect.{u} m] : Freer.{u+1} m (ULift Nat) := do
+    ioEff0 (IO.println "argh")
+    pure (ULift.up 4)
 
-#reduce goWormhole (do let z ← getNat; if z < 3 then dumpArgh else pure 3 : Freer ExampleCommand Nat)
+def wormHoleX.{u} : Freer.{u+1} [NoopEffect.{u+1}, IOEffect.{u}] (ULift Nat) := do
+    let z ← getNat
+    if z.down < 3
+        then dumpArgh
+        else pure (ULift.up 3)
+
+#eval walkExpr ((do ioEff0 (IO.println "argh"); pure (ULift.up 4)) : Freer [IOEffect] (ULift Nat))
+#reduce goWormhole wormHoleX
 
 end FreerSkel
-
