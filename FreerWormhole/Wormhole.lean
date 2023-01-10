@@ -95,10 +95,11 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
     match (← instantiateMVars e) with
     | const c _ => do
         let fullName := c.toString
-        match c.components.getLast? with
-        | Option.none => pure <| Lean.mkStrLit fullName
-        | Option.some l => 
-            match transformers.lookup l.toString with
+        --match c.components.getLast? with
+        --| Option.none => pure <| Lean.mkStrLit fullName
+        --| Option.some l => 
+            --match transformers.lookup l.toString with
+            match transformers.lookup fullName with
             | Option.some f => f argStack (runWormhole transformers)
             | Option.none => do
                 let e ← getEnv
