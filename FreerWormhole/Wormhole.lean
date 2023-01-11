@@ -155,19 +155,19 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
                     pure <| mkStrLit (debugStr ++ "/noMatch:" ++ toString projName)
                 --magicSkeleton transformers (structVal :: argStack) (mkConst projName)
     | fvar _ => do
-        logInfo <| "fvar:" ++ toString e
+        logInfo <| "don't know what to do with fvar:" ++ toString e
         pure <| Lean.mkStrLit "fvar"
     | mvar _ => do
-        logInfo <| "mvar:" ++ toString e
+        logInfo <| "don't know what to do with mvar:" ++ toString e
         pure <| Lean.mkStrLit "mvar"
     | sort _ => do
-        logInfo <| "sort:" ++ toString e
+        logInfo <| "don't know what to do with sort:" ++ toString e
         pure <| Lean.mkStrLit "sort"
     | mdata _ _ => do
-        logInfo <| "mdata:" ++ toString e
+        logInfo <| "don't know what to do with mdata:" ++ toString e
         pure <| Lean.mkStrLit "mdata"
     | _ => do
-        logInfo <| "zort:" ++ ctorName e ++ toString e
+        logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
         pure <| Lean.mkStrLit <| "zort" ++ ctorName e ++ "/" ++ toString e
 
 syntax (name := throughWormhole) "goWormhole" term : term
@@ -185,16 +185,7 @@ elab "genWormhole" wormholeName:ident " >: " transforms:term " :< " : command =>
     elabCommand skelCommand
 
 
--- Checks if some type is one of the effect types in the provided list. If it is, returns some
--- Expr value. If not, returns Option.none
--- So if the list was t := [⟨IOEff,"IO"⟩,⟨Free Id,"Free"⟩] then
---   > checkAgainstMonads (IO a) t => Option.some "IO"
---   > checkAgainstMonads Nat t    => Option.none
---   > checkAgainstMonads (Free Id Nat) t => Option.some "Free"
-def checkAgainstEffects : Expr → List (Expr × Expr) → TermElabM (Option Expr) := fun t l => do
-    pure <| l.lookup t
-
-
+  
 -- Look at a send expression and convert into the approriate FreeSkeleton.Command value. We check the type
 -- of the argument to send and compare it to a list of possible monads in "converters". Used
 -- by magicSendSkeleton.
@@ -202,7 +193,7 @@ def dispatchSend (converters : List (Expr × Expr)) (targetType : Expr) (argStac
     let mv := argStack.get! 4
     let et ← inferType mv
     --goExpr sending 0
-    let m ← checkAgainstEffects et converters
+    let m := converters.lookup et
     --logInfo argStack
     match m with
     | Option.none => pure <| Lean.mkStrLit ("no match for send: " ++ toString mv)

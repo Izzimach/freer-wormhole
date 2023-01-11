@@ -49,27 +49,19 @@ def skeletonTransformers (resultTypeName : Expr) : FreerTransformers :=
         pure := fun args mk => do
             let et := args.get! 2
             let a := args.get! 3
-            IO.println "pure value:"
-            goExpr a 0
             mkAppM ``FreerSkeleton.Pure #[mkStrLit "?"],
         ifthenelse := fun args mk => do
             let b₁ ← mk args (args.get! 3)
             let b₂ ← mk args (args.get! 4)
-            mkAppM ``FreerSkeleton.NonDet #[resultTypeName, b₁, b₂],
+            mkAppM ``FreerSkeleton.NonDet #[b₁, b₂],
         patMatch := fun branches mk => pure <| listToNonDetFreer (resultTypeName) branches,
         effectMatch := fun args mk => do
             let ou := args.get! 3
             let next := args.get! 4
-            --goExpr ou 0
-            --logInfo next
             if ou.isAppOf (String.toName "HasEffect.inject")
             then do
-                IO.println "effect:"
                 let eff := ou.getArgD 3 (mkStrLit "?")
-                let effLevels := eff.getAppFn.constLevels!
-                IO.println effLevels
                 let effName := eff.getAppFn.dbgToString
-                goExpr eff 0
                 mkAppM ``FreerSkeleton.Command #[mkStrLit effName]
             else mkAppM ``FreerSkeleton.Error #[mkStrLit "not an effect"]
     }
@@ -110,23 +102,22 @@ section FreerSkel
 -- final monad implementing the state and IO
 genWormhole freerSkel >: (buildWormholeTransformers <| skeletonTransformers (mkConst ``String)) :<
 
-def getNat.{u} [HasEffect NoopEffect.{u+1} m] : Freer.{u+1} m (ULift Nat) := do noop; pure (ULift.up 3)
+def noop3.{u} [HasEffect NoopEffect.{u+1} m] : Freer.{u+1} m (ULift Nat) := do noop; pure (ULift.up 3)
 
 def dumpArgh.{u} [HasEffect IOEffect.{u} m] : Freer.{u+1} m (ULift Nat) := do
     ioEff0 (IO.println "argh")
     pure (ULift.up 4)
 
 def wormHoleX.{u} : Freer.{u+1} [NoopEffect.{u+1}, IOEffect.{u}] (ULift Nat) := do
-    let z ← getNat
+    let z ← noop3
     if z.down < 3
         then dumpArgh
         else pure (ULift.up 3)
 
 #eval walkExpr ((do ioEff0 (IO.println "argh"); pure (ULift.up 4)) : Freer [IOEffect] (ULift Nat))
 #eval walkExpr FreerSkeleton.Pure "?"
-set_option maxRecDepth 1024
 
-#eval goWormhole (getNat : Freer [NoopEffect] (ULift Nat))
+#eval goWormhole wormHoleX
 
 def x : FreerSkeleton String := FreerSkeleton.Pure "?"
 
