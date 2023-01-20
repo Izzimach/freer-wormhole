@@ -72,15 +72,14 @@ def isMatchCall : Name → Bool := fun n =>
 
 elab "walkExpr" thing:term : term => walkExpr thing
 
-
 -- A TransformerApp takes a list of arguments (as Exprs) and a recursive function to
 -- call on child Expr's (this will usually be runWormhole partially applied to a transformer list) and constructs an
 -- Expr from that.
-def TransformerApp : Type := List Expr → (List Expr → Expr → TermElabM Expr) → TermElabM Expr
+def TransformerApp : Type := Array Expr → (Array Expr → Expr → TermElabM Expr) → TermElabM Expr
 
 -- Dirty beta-reduce. We try to beta reduce functions, with the expectation that some
 -- expressions will be malformed since we may not have all the information we need.
-def magicBR (argStack : List Expr) (funcBody : Expr) (offset : Nat) : Expr :=
+def magicBR (argStack : Array Expr) (funcBody : Expr) (offset : Nat) : Expr :=
     match funcBody with
     | bvar ix => @Option.getD Expr (argStack.get? (offset - ix)) (Lean.mkStrLit "Bad bound variable")
     | app f arg => Expr.app (magicBR argStack f offset) (magicBR argStack arg offset)
@@ -91,7 +90,7 @@ def magicBR (argStack : List Expr) (funcBody : Expr) (offset : Nat) : Expr :=
 --
 -- transform a Lean Expr tree using a lookup-list of TransformerApp elements
 --
-partial def runWormhole (transformers : List (String × TransformerApp)) (argStack : List Expr) (e : Expr) : TermElabM Expr := do
+partial def runWormhole (transformers : List (String × TransformerApp)) (argStack : Array Expr) (e : Expr) : TermElabM Expr := do
     match (← instantiateMVars e) with
     | const c _ => do
         let fullName := c.toString
@@ -109,7 +108,7 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
                 | Option.some ci => do
                     match ci.value? with
                     | Option.none => do
-                        --logInfo argStack
+                        logInfo argStack
                         pure <| Lean.mkStrLit ("no value for constantinfo of " ++ toString c ++ " constantinfo=" ++ toString ci.name ++ " ctor?=" ++ toString ci.isCtor ++ " inductive?=" ++ toString ci.isInductive)
                     | Option.some val =>
                         match (isMatchCall c), (transformers.lookup "match") with
@@ -121,19 +120,19 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
                             logInfo matchArgs
                             let branchCount := matchArgs.length - 3
                             -- pull the branches out of the argument stack
-                            let branches := List.toArray <| List.take branchCount <| List.drop 2 argStack
+                            let branches := List.toArray <| List.take branchCount <| List.drop 2 argStack.toList
                             let breakBranches ← Array.sequenceMap branches (fun z => runWormhole transformers argStack z)
-                            matchBuild (Array.toList breakBranches) (runWormhole transformers)
+                            matchBuild (breakBranches) (runWormhole transformers)
                         | _, _ => runWormhole transformers argStack val
-    | app f arg => runWormhole transformers (arg :: argStack) f
+    | app f arg => runWormhole transformers (List.toArray <| arg :: (argStack.toList)) f
     | lam _ _ body _ => do
         -- try to substitute in bound variables and then skeletonize it
         let peBody := magicBR argStack body 0
         runWormhole transformers argStack peBody
     | bvar ix => pure <| Option.getD (argStack.get? ix) (Lean.mkStrLit "Error: bad bound variable")
     | letE n t v body _ => do
-        logInfo <| "letE, stack: " ++ argStack
-        let peBody := magicBR (v :: argStack) body 0
+        --logInfo <| "letE, stack: " ++ argStack
+        let peBody := magicBR argStack body 0
         runWormhole transformers argStack peBody
     | proj ty idx struct => do
         let structVal ← runWormhole transformers argStack struct
@@ -170,7 +169,92 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
         logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
         pure <| Lean.mkStrLit <| "zort" ++ ctorName e ++ "/" ++ toString e
 
+
+-- wormhole re-written to find function applications
+partial def wormhole2 (transformers : List (String × TransformerApp)) (argStack : Array Expr) (e : Expr) : TermElabM Expr := do
+    let e ← instantiateMVars e
+    match e with
+    | .app _ _ => do
+        let fn := e.getAppFn
+        let args := e.getAppArgs
+        wormhole2 transformers (Array.append args argStack) fn
+    | .const c _ => do
+        logInfo <| "const: " ++ (String.intercalate "/" <| c.components.map toString)
+        logInfo argStack
+        match c.components.getLast? with
+        | .none => pure <| mkStrLit "app, no function name!"
+        | .some n => do
+            --logInfo (← e.getAppArgs.mapM instantiateMVars)
+            --pure <| mkStrLit ("app,  function name = " ++ n.toString)
+            let tr := transformers.lookup n.toString
+            match tr with
+            | .some tf => do
+                logInfo <| "applying transformer for " ++ n.toString
+                let tresult ← tf argStack (wormhole2 transformers)
+                logInfo <| "transform result:"
+                logInfo tresult
+                pure tresult
+            | .none => do
+                let env ← getEnv
+                let v := env.find? c
+                match v with
+                | Option.none => pure <| Lean.mkStrLit ("Cannot find constant named " ++ toString c)
+                | Option.some cr => do
+                    match cr.value? with
+                    | Option.none => pure <| mkStrLit ("No value for const - " ++ c.toString)
+                    | Option.some s => wormhole2 transformers argStack s
+    | .lam bn bt body bi => do
+        logInfo <| "lambda, arg name=" ++ bn.toString ++ ", args=" ++ argStack.toList.toString
+        if argStack.size = 0
+        then do
+            logInfo "no args for lambda"
+            wormhole2 transformers #[] body
+        else do
+            let result := e.beta argStack
+            logInfo "beta reduce result:"
+            logInfo result
+            --pure <| mkStrLit "lambda"
+            wormhole2 transformers #[] result
+    | proj ty idx struct => do
+        -- for a projection we need to lookup the struct and then find the relevant field
+        let structVal ← wormhole2 transformers argStack struct
+        let e ← getEnv
+        let debugStr :="proj:" ++ toString ty ++ "," ++ toString idx ++ "/" ++ toString structVal
+        match getStructureInfo? e ty with
+        | Option.none => pure <| mkStrLit debugStr
+        | Option.some info => do
+            match StructureInfo.getProjFn? info idx with
+            | Option.none => pure <| mkStrLit debugStr
+            | Option.some projName => do
+                -- at this point we have the relevant field name/constructor, so we apply
+                -- the usual lookup/transform step as for const
+                match transformers.lookup projName.toString with
+                -- I though we would need to append structVal to here, but it was already dumped
+                -- onto the stack
+                | Option.some tf => tf argStack (wormhole2 transformers)
+                | Option.none => do
+                    logInfo debugStr
+                    logInfo argStack
+                    pure <| mkStrLit (debugStr ++ "/noMatch:" ++ toString projName)
+    | fvar _ => do
+        logInfo <| "don't know what to do with fvar:" ++ toString e
+        pure <| Lean.mkStrLit "fvar"
+    | mvar _ => do
+        logInfo <| "don't know what to do with mvar:" ++ toString e
+        pure <| Lean.mkStrLit "mvar"
+    | sort _ => do
+        logInfo <| "don't know what to do with sort:" ++ toString e
+        pure <| Lean.mkStrLit "sort"
+    | mdata _ _ => do
+        logInfo <| "don't know what to do with mdata:" ++ toString e
+        pure <| Lean.mkStrLit "mdata"
+    | _ => do
+        logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
+        pure <| Lean.mkStrLit <| "zort" ++ ctorName e ++ "/" ++ toString e
+
 syntax (name := throughWormhole) "goWormhole" term : term
+syntax (name := wormholed) "goWormhole2" term : term
+
 
 -- standard macro to generate a wormhole, transforming Lean expressions according to a list of transforms
 -- you provide.
@@ -180,40 +264,23 @@ elab "genWormhole" wormholeName:ident " >: " transforms:term " :< " : command =>
         `(@[termElab Wormhole.throughWormhole]
           def $wormholeName : TermElab := fun stx _ => do
               let e ← elabTerm (Syntax.getArg stx 1) Option.none
-              runWormhole $transforms [] e
+              runWormhole $transforms #[] e
          )
     elabCommand skelCommand
 
-
-  
--- Look at a send expression and convert into the approriate FreeSkeleton.Command value. We check the type
--- of the argument to send and compare it to a list of possible monads in "converters". Used
--- by magicSendSkeleton.
-def dispatchSend (converters : List (Expr × Expr)) (targetType : Expr) (argStack : List Expr) : TermElabM Expr := do
-    let mv := argStack.get! 4
-    let et ← inferType mv
-    --goExpr sending 0
-    let m := converters.lookup et
-    --logInfo argStack
-    match m with
-    | Option.none => pure <| Lean.mkStrLit ("no match for send: " ++ toString mv)
-    | Option.some f => pure <| Lean.mkAppN f #[argStack.get! 3, argStack.get! 4]
-
-
--- a variation of the normal genWormhole that also processea calls to Freer.HasEffect.send and routes them
--- through dispatchSend. You provide a list that maps from the sum type of effects to
--- the final generated Expr values.
 set_option hygiene false in
-elab "genWormholeSend" wormholeName:ident " $: " target:term ">: " transforms:term " :< " sendTransforms:doElem " :$ " : command => do
+elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command => do
     let skelCommand ← 
-        `(@[termElab Wormhole.throughWormhole]
-          def $wormholeName : TermElab := fun stx oxe => do
+        `(@[termElab Wormhole.wormholed]
+          def $wormholeName : TermElab := fun stx _ => do
               let e ← elabTerm (Syntax.getArg stx 1) Option.none
-              let t ← $sendTransforms
-              runWormhole ($transforms ++ [⟨"Freer.HasEffect.send",fun args mk => dispatchSend t $target args⟩]) [] e
+              wormhole2 $transforms #[] e
          )
     elabCommand skelCommand
 
-  
+
+genWormhole2 ww >: [] :<
+
+#check goWormhole2 ((3 : Nat) + 3)
 
 end Wormhole
