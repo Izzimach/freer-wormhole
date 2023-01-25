@@ -4,11 +4,7 @@
 import Lean
 import Lean.Parser
 
-import FreerWormhole.Effects.Freer
-
-
 open Lean Elab Expr Command Meta Term MVarId
-open Freer
 
 namespace Wormhole
 
@@ -171,7 +167,7 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
 
 
 -- wormhole re-written to find function applications
-partial def wormhole2 (transformers : List (String × TransformerApp)) (argStack : Array Expr) (e : Expr) : TermElabM Expr := do
+partial def wormhole2 (transformers : Std.RBMap String TransformerApp compare) (argStack : Array Expr) (e : Expr) : TermElabM Expr := do
     let e ← instantiateMVars e
     match e with
     | .app _ _ => do
@@ -186,12 +182,12 @@ partial def wormhole2 (transformers : List (String × TransformerApp)) (argStack
         | .some n => do
             --logInfo (← e.getAppArgs.mapM instantiateMVars)
             --pure <| mkStrLit ("app,  function name = " ++ n.toString)
-            let tr := transformers.lookup n.toString
+            let tr := transformers.find? n.toString
             match tr with
             | .some tf => do
                 logInfo <| "applying transformer for " ++ n.toString
                 let tresult ← tf argStack (wormhole2 transformers)
-                logInfo <| "transform result:"
+                logInfo <| "transform result for " ++ n.toString ++ " :"
                 logInfo tresult
                 pure tresult
             | .none => do
@@ -228,7 +224,7 @@ partial def wormhole2 (transformers : List (String × TransformerApp)) (argStack
             | Option.some projName => do
                 -- at this point we have the relevant field name/constructor, so we apply
                 -- the usual lookup/transform step as for const
-                match transformers.lookup projName.toString with
+                match transformers.find? projName.toString with
                 -- I though we would need to append structVal to here, but it was already dumped
                 -- onto the stack
                 | Option.some tf => tf argStack (wormhole2 transformers)
@@ -279,7 +275,7 @@ elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command =
     elabCommand skelCommand
 
 
-genWormhole2 ww >: [] :<
+genWormhole2 ww >: Std.RBMap.empty :<
 
 #check goWormhole2 ((3 : Nat) + 3)
 
