@@ -17,41 +17,39 @@ open Std.RBMap
 
 open Lean Elab Command Meta Term
 
-open Freer Effect Wormhole StdEffs
+open Freer Effect HEffect Wormhole StdEffs
 
 
 
-inductive FreerSkeleton.{u} (t : Type u) where
-| Error : String → FreerSkeleton t
-| Empty
-| Pure : t → FreerSkeleton t
-| Command : t → FreerSkeleton t
-| Heff : t → List (FreerSkeleton t) → FreerSkeleton t
-| Bind : FreerSkeleton t → FreerSkeleton t → FreerSkeleton t
-| NonDet : FreerSkeleton t → FreerSkeleton t → FreerSkeleton t
-| Recursive : String → FreerSkeleton t → FreerSkeleton t
-| Recurse : String → FreerSkeleton t
+inductive FreerSkeleton.{u} (effs : List Effect.{u}) (t : Type u) : Type (u+1) where
+| Error : String → FreerSkeleton effs t
+| Empty : FreerSkeleton effs t
+| Pure : t → FreerSkeleton effs t
+| Command : OU effs x → FreerSkeleton effs t
+| Bind : FreerSkeleton effs t → FreerSkeleton effs t → FreerSkeleton effs t
+| NonDet : FreerSkeleton effs t → FreerSkeleton effs t → FreerSkeleton effs t
+| Recursive : String → FreerSkeleton effs t → FreerSkeleton effs t
+| Recurse : String → FreerSkeleton effs t
 
 mutual
 
-def dumpFreerSkeleton {t : Type} [ToString t] : FreerSkeleton t → String
+def dumpFreerSkeleton {t : Type} [ToString t] : FreerSkeleton effs t → String
     | .Error e => "Error : " ++ e
     | .Empty   => "Empty"
     | .Pure t => "Pure " ++ toString t
-    | .Command t => "Command: " ++ toString t
-    | .Heff t effs => "Heff: " ++ toString t ++ " [[" ++ dumpHeff effs ++ "]]"
+    | .Command t => "Command: " --++ toString t
     | .Bind a b => dumpFreerSkeleton a ++ " >>= " ++ dumpFreerSkeleton b
     | .NonDet a b => "(" ++ dumpFreerSkeleton a ++ " || " ++ dumpFreerSkeleton b ++ ")"
     | .Recursive s r => "{{Recursive " ++ s ++ " :: " ++ dumpFreerSkeleton r ++ "}}"
     | .Recurse s => "Call Recurse //" ++ s++ "//"
 
-def dumpHeff {t : Type} [ToString t] : List (FreerSkeleton t) → String
+def dumpHeff {t : Type} [ToString t] : List (FreerSkeleton effs t) → String
     | List.nil => ""
     | List.cons h t => dumpFreerSkeleton h ++ " |-| " ++ dumpHeff t
 
 end
 
-instance [ToString t] : ToString (FreerSkeleton t) where
+instance [ToString t] : ToString (FreerSkeleton effs t) where
     toString := dumpFreerSkeleton
 
 def listToNonDetFreer (targetType : Expr) (l : List Expr) : Expr :=
@@ -67,46 +65,64 @@ def monadFuncs : Std.RBMap String TransformerApp compare :=
     Std.RBMap.ofList
     [
         ⟨"Impure", fun args mk => do
+            let effs := args.get! 0
             let a₁ := args.get! 3
             let a₂ := args.get! 4
             let r₁ ← mk #[] a₁
             let r₂ ← mk #[mkStrLit "bad argument"] a₂
-            mkAppM ``FreerSkeleton.Bind #[r₁,r₂]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Bind [.zero]) #[effs, mkConst ``String, r₁,r₂]
         ⟩,
         ⟨"bind", fun args mk => do
-            let a₁ := args.get! 4
-            let a₂ := args.get! 5
-            let r₁ ← mk #[] a₁
-            let r₂ ← mk #[mkStrLit "Bad argument"] a₂
-            mkAppM ``FreerSkeleton.Bind #[r₁,r₂]
+            let bindId := args.get! 0
+            match bindId.getAppFn with
+            | .const n lvls => do
+                let effs := bindId.getAppArgs.get! 0
+                let a₁ := args.get! 4
+                let a₂ := args.get! 5
+                let r₁ ← mk #[] a₁
+                let r₂ ← mk #[mkStrLit "Bad argument"] a₂
+                pure <| mkAppN (mkConst ``FreerSkeleton.Bind lvls) #[effs, mkConst ``String, r₁,r₂]
+            | _ => do
+                logInfo "bind isnt app"
+                pure <| mkStrLit "bind isnt app"
         ⟩,
         ⟨"inject", fun args mk => do
-            mkAppM ``FreerSkeleton.Pure #[mkStrLit "inject"]
+            let effs := args.get! 1
+            pure <| mkAppN (mkConst ``FreerSkeleton.Pure) #[effs, mkConst ``String, mkStrLit "inject"]
         ⟩,
         ⟨"Pure", fun args mk => do
             let a₁ := args.get! 2
-            mkAppM ``FreerSkeleton.Pure #[mkStrLit "pure"]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Pure) #[mkStrLit "pure"]
         ⟩,
         ⟨"pure", fun args mk => do
+            let pureId := args.get! 0
             let et := args.get! 2
             let a := args.get! 3
-            mkAppM ``FreerSkeleton.Pure #[mkStrLit "?"]
+            --logInfo pureId
+            match pureId.getAppFn with
+            | .const n lvls => do
+                let pureEffs := pureId.getAppArgs.get! 0
+                pure <| mkAppN (mkConst ``FreerSkeleton.Pure lvls) #[pureEffs, mkConst ``String, mkStrLit "?"]
+            | _ => do
+                logInfo "isntApp"
+                pure <| mkStrLit "isntApp"
         ⟩,
         -- if
         ⟨"ite", fun args mk => do
+            logInfo <| args.get! 0
             let b₁ ← mk args (args.get! 3)
             let b₂ ← mk args (args.get! 4)
-            mkAppM ``FreerSkeleton.NonDet #[b₁, b₂]
+            pure <| mkAppN (mkConst ``FreerSkeleton.NonDet [.zero]) #[b₁, b₂]
         ⟩,
         -- decidible if
         ⟨"dite", fun args mk => do
             let b₁ ← mk args (args.get! 3)
             let b₂ ← mk args (args.get! 4)
-            mkAppM ``FreerSkeleton.NonDet #[b₁, b₂]
+            pure <| mkAppN (mkConst ``FreerSkeleton.NonDet [.zero]) #[b₁, b₂]
         ⟩,
         -- A recursive call
         ⟨"Recurse", fun args mk => do
-            pure <| mkAppN (mkConst ``FreerSkeleton.Recurse [Level.zero]) #[mkConst ``String, args.get! 0]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Recurse [.zero]) #[mkConst ``String, args.get! 0]
         ⟩,
         -- Wrapper around a recursive function
         ⟨"fix", fun args mk => do
@@ -115,7 +131,7 @@ def monadFuncs : Std.RBMap String TransformerApp compare :=
             let recFun := args.get! 4
             let recursiveCall := mkAppN (mkConst ``FreerSkeleton.Recurse) #[recVar]
             let recurseBody ← mk #[mkStrLit "arg", recursiveCall] recFun
-            mkAppM ``FreerSkeleton.Recursive #[recVar, recurseBody]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Recursive) #[recVar, recurseBody]
         ⟩
     ]
     
@@ -152,7 +168,7 @@ def wormHoleX.{u} : Freer.{u+1} [NoopEffect.{u+1}, IOEffect.{u}] (ULift Nat) := 
 genWormhole2 skeltonize >: monadFuncs :<
 
 
-#reduce goWormhole2 wormHoleX
+#check goWormhole2 (noop3.{0} : Freer [NoopEffect] (ULift Nat))--wormHoleX.{0}
 
 --#eval goWormhole2 wormHoleX
 
@@ -180,7 +196,7 @@ def heffTransformers :=
     List.foldl (fun a (Prod.mk s f) => a.insert s f) FreerSkel.monadFuncs
         [
         ⟨"hLift", fun args mk => do
-            mkAppM ``FreerSkeleton.Pure #[mkStrLit "hlift"]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Pure) #[mkStrLit "hlift"]
         ⟩,
         ⟨"catchH", fun args mk => do
             logInfo args
@@ -196,16 +212,18 @@ def heffTransformers :=
             pure <| mkAppN (mkConst ``FreerSkeleton.Heff [.zero]) #[mkConst ``String, mkStrLit "catch", node1]
         ⟩,
         ⟨"hBind", fun args mk => do
-            mkAppM ``FreerSkeleton.Pure #[mkStrLit "hBind"]
+            pure <| mkAppN (mkConst ``FreerSkeleton.Pure) #[mkStrLit "hBind"]
         ⟩
         ]
 
 -- this makes the pretty-printer show universe levels
 set_option pp.universes true
+--set_option pp.fullNames true
 
 genWormhole2 skeltonize >: heffTransformers :<
 
+#check goWormhole2 (pure (ULift.up 3) : Freer.{1} [IOEffect] (ULift Nat))
 
-#eval goWormhole2 (@transact [CatchHEff (onlyRet Unit), hLifted ThrowEff, hLifted (StateEff Nat)])
+--#eval goWormhole2 (@transact [CatchHEff (onlyRet Unit), hLifted ThrowEff, hLifted (StateEff Nat)])
 
 namespace HEffSkel
