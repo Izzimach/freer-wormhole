@@ -13,8 +13,7 @@ structure Effect.{u} : Type (u+1) where
    (op : Type u)
    (ret : op → Type u)
 
-
-section Effect
+namespace Effect
 
 -- The "Open Union" contains one operation from a list of possible effects,
 -- determined at run time. This means we have to peel off .Node constructors, similar
@@ -56,9 +55,11 @@ end Effect
 
 inductive Freer.{u} (effs : List Effect.{u}) : Type u → Type (u+1) where
     | Pure : a → Freer effs a
-    | Impure : {x : Type u} → OU effs x → (x → Freer effs a) → Freer effs a
+    | Impure : {x : Type u} → Effect.OU effs x → (x → Freer effs a) → Freer effs a
 
-section Freer
+namespace Freer
+
+open Effect
 
 -- lift into Freer
 def send {e : Effect} {effs : List Effect} [HasEffect e effs] (sendop : e.op) : Freer effs (e.ret sendop) :=
@@ -94,19 +95,14 @@ def foldOver {a : Type u} {b : Type v} {effs : List Effect.{u}} (pf : a → b) (
 --
 -/
 def bindFreer {a b : Type u} (m : Freer effs a) (f : a → Freer effs b) : Freer effs b :=
-    @foldOver a (Freer effs b) effs f .Impure m
+    --@foldOver a (Freer effs b) effs f .Impure m
+    match m with
+    | .Pure a => f a
+    | .Impure gx next => Freer.Impure gx (fun z => bindFreer (next z) f)
 
 def pureFreer {α : Type u} (a : α) : Freer effs α := Freer.Pure a
 
-instance : Monad (Freer effs) where
-    pure := pureFreer
-    bind := bindFreer
 
-instance : Pure (Freer effs) where
-    pure := pureFreer
-
-instance : Bind (Freer effs) where
-    bind := bindFreer
 
 -- Handler is the handler for a specific effect: ret is for Pure constructors
 -- and handle is for impure constructors. The result has an 'inp' type so that the  monad can
@@ -138,3 +134,13 @@ def runEff : Freer [] a → a
 
 
 end Freer
+
+instance : Monad (Freer effs) where
+    pure := Freer.pureFreer
+    bind := Freer.bindFreer
+
+instance : Pure (Freer effs) where
+    pure := Freer.pureFreer
+
+instance : Bind (Freer effs) where
+    bind := Freer.bindFreer

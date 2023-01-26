@@ -13,12 +13,12 @@ structure HEffect.{u} where
     (fork : cmd  → Effect.{u})
     (retH : cmd → Type u)
 
-section HEffect
+namespace HEffect
 
 -- Choose one HEffect from a list of them.
 inductive HOU : List HEffect → (ret : Type u) → Effect → Type (u+1) where
     | Leaf : (c : heff.cmd) → HOU (heff :: heffs) (heff.retH c) (heff.fork c)
-    | Node : HOU heffs c fork → HOU (_ :: heffs) c fork
+    | Node : HOU heffs c f → HOU (_ :: heffs) c f
 
 
 inductive Hefty.{u} : List HEffect → Type u → Type (u+1) where
@@ -74,14 +74,6 @@ def elaborate (e : Elaboration.{u} heffs eff) (h : Hefty heffs a) : Freer eff a 
 -- up an Elaboration by chaining of several Elab1 terms.
 def Elab1.{u} (heff : HEffect) (heffs : List HEffect) (effs : List Effect) : Type (u+1) :=
     Elaboration.{u} heffs effs → Elaboration.{u} (heff :: heffs) effs
-
-
-
-
-
-
-
-
 
 
 -- Elaborations are usually specified as cons-ing an HEffect onto an already-established list of HEffects.
