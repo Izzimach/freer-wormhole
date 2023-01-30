@@ -167,69 +167,83 @@ partial def runWormhole (transformers : List (String × TransformerApp)) (argSta
 
 
 
+def wormholeResult : Bool → Type
+    | true => Syntax
+    | false => Expr
+
+def wormholePure {applyTransformers : Bool} (message : String) : TermElabM (wormholeResult applyTransformers) :=
+    match applyTransformers with
+    | true => pure <| (Syntax.mkStrLit message : Syntax)
+    | false => pure <| Lean.mkStrLit message
+
 -- A TransformerApp takes a list of arguments (as Exprs) and a recursive function to
 -- call on child Expr's (this will usually be runWormhole partially applied to a transformer list) and constructs an
 -- Expr from that.
-def TransformerAppSyntax : Type := Array Expr → (Array Expr → Expr → TermElabM Syntax) → TermElabM Syntax
-
+def TransformerAppSyntax : Type := Array Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax
 
 -- wormhole re-written to find function applications
-partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax compare) (argStack : Array Expr) (e : Expr) : TermElabM Expr := do
+partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax compare) (applyTransformers : Bool) (argStack : Array Expr) (e : Expr) : TermElabM (wormholeResult applyTransformers) := do
     let e ← instantiateMVars e
     match e with
     | .app _ _ => do
         let fn := e.getAppFn
         let args := e.getAppArgs
-        wormhole2 transformers (Array.append args argStack) fn
+        wormhole2 transformers applyTransformers (Array.append args argStack) fn
     | .const c _ => do
         logInfo <| "const: " ++ (String.intercalate "/" <| c.components.map toString)
         logInfo argStack
         match c.components.getLast? with
-        | .none => pure <| mkStrLit "app, no function name!"
+        | .none => wormholePure "app, no function name!"
         | .some n => do
             --logInfo (← e.getAppArgs.mapM instantiateMVars)
             --pure <| mkStrLit ("app,  function name = " ++ n.toString)
             let tr := transformers.find? n.toString
             match tr with
-            | .some tf => do
-                logInfo <| "stopping unfold at " ++ n.toString
-                pure  e
-                /-let tresult ← tf argStack (wormhole2 transformers)
-                logInfo <| "transform result for " ++ n.toString ++ " :"
-                logInfo tresult
-                pure tresult-/
+            | .some tf => match applyTransformers with
+                | false => do
+                    logInfo <| "stopping unfold at " ++ n.toString
+                    pure e
+                | true => do
+                    let tresult ← tf argStack (wormhole2 transformers)
+                    logInfo <| "transform result for " ++ n.toString ++ " :"
+                    logInfo tresult
+                    pure tresult
             | .none => do
                 let env ← getEnv
                 let v := env.find? c
                 match v with
-                | Option.none => pure <| mkStrLit "Cannot find constant named "
+                | Option.none => wormholePure "Cannot find constant named "
                 | Option.some cr => do
                     match cr.value? with
                     | Option.none => do
+                        -- constructors are assembled and returned if we're not transforming, so that
+                        -- projections can properly deconstruct them
                         if cr.isCtor
-                        then pure <| mkAppN e argStack--<| mkStrLit <| "Found constructor const - " ++ c.toString
-                        else pure <| mkStrLit <| "No value for const - " ++ c.toString
-                    | Option.some s => wormhole2 transformers argStack s
+                        then match applyTransformers with
+                             | true => wormholePure <| "Found constructor const - " ++ c.toString
+                             | false =>  pure <| mkAppN e argStack
+                        else wormholePure <| "No value for const - " ++ c.toString
+                    | Option.some s => wormhole2 transformers applyTransformers argStack s
     | .lam bn bt body bi => do
         logInfo <| "lambda, arg name=" ++ bn.toString ++ ", args=" ++ argStack.toList.toString
         if argStack.size = 0
         then do
             logInfo "no args for lambda"
-            wormhole2 transformers #[] body
+            wormhole2 transformers applyTransformers #[] body
         else do
             let result := e.beta argStack
             logInfo "beta reduce result:"
             logInfo result
             --pure <| mkStrLit "lambda"
-            wormhole2 transformers #[] result
+            wormhole2 transformers applyTransformers #[] result
     | proj ty idx struct => do
         logInfo <| "index for project : " ++ (toString idx)
         logInfo struct
         -- for a projection we need to lookup the struct and then find the relevant field
-        let structVal ← wormhole2 transformers argStack struct
+        let structVal ← wormhole2 transformers false argStack struct
         let structType ← inferType struct
         logInfo "struct after transform:"
-        logInfo structVal
+        --logInfo <| (structVal : Expr)
         logInfo structType
         let env ← getEnv
         let structName := structType.getAppFn
@@ -241,7 +255,7 @@ partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax comp
             | .some (.ctorInfo cval) => do
                 logInfo "struct ctor info: "
                 logInfo <| toString cval.cidx
-                pure <| mkStrLit "struct was constructor, oops"
+                wormholePure "struct was constructor, oops"
             | .some (.inductInfo ival) => do
                 logInfo <| "inductive name : " ++ toString ival.name
                 logInfo <| String.intercalate "/" <| ival.ctors.map toString
@@ -256,25 +270,25 @@ partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax comp
                     let projExpr := mkAppN projResult (reducedArgs.toArray)
                     logInfo <| "after projection: "
                     logInfo projExpr
-                    wormhole2 transformers #[] projExpr
-                | _ => pure <| mkStrLit "invalid struct contructor"
-            | _ => pure <| mkStrLit <| "invalid lookup of struct " ++ toString c
-        | _ => pure <| mkStrLit "struct has no name"
+                    wormhole2 transformers applyTransformers #[] projExpr
+                | _ => wormholePure "invalid struct contructor"
+            | _ => wormholePure <| "invalid lookup of struct " ++ toString c
+        | _ => wormholePure "struct has no name"
     | fvar _ => do
         logInfo <| "don't know what to do with fvar:" ++ toString e
-        pure <| mkStrLit "fvar"
+        wormholePure "fvar"
     | mvar _ => do
         logInfo <| "don't know what to do with mvar:" ++ toString e
-        pure <| mkStrLit "mvar"
+        wormholePure "mvar"
     | sort _ => do
         logInfo <| "don't know what to do with sort:" ++ toString e
-        pure <| mkStrLit "sort"
+        wormholePure "sort"
     | mdata _ _ => do
         logInfo <| "don't know what to do with mdata:" ++ toString e
-        pure <| mkStrLit "mdata"
+        wormholePure "mdata"
     | _ => do
         logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
-        pure <| mkStrLit <| "zort" ++ ctorName e ++ "/" ++ toString e
+        wormholePure <| "zort" ++ ctorName e ++ "/" ++ toString e
 
 syntax (name := throughWormhole) "goWormhole" term : term
 syntax (name := wormholed) "goWormhole2" term : term
@@ -298,9 +312,9 @@ elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command =
         `(@[termElab Wormhole.wormholed]
           def $wormholeName : TermElab := fun stx _ => do
               let e ← elabTerm (Syntax.getArg stx 1) Option.none
-              --let newS ← wormhole2 $transforms #[] e
-              --elabTerm newS .none
-              wormhole2 $transforms #[] e
+              let newS ← wormhole2 $transforms true #[] e
+              elabTerm newS .none
+              --wormhole2 $transforms false #[] e
          )
     elabCommand skelCommand
 
