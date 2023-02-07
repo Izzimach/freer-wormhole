@@ -49,6 +49,7 @@ instance [HasEffect e effs] : HasEffect e (z :: effs) where
                          | .Leaf c => Option.none
                          | .Node ou' => HasEffect.project ou'
 
+
 end Effect
 
 
@@ -65,6 +66,8 @@ open Effect
 def send {e : Effect} {effs : List Effect} [HasEffect e effs] (sendop : e.op) : Freer effs (e.ret sendop) :=
     @Freer.Impure effs (e.ret sendop) _ (HasEffect.inject sendop) .Pure
 
+-- Sometimes you have a monad with some effects but you need to pass it into a function
+-- with additional effects (see the Catch/Throw higher-order effect for instance).
 def weaken.{u} {g : Effect.{u}} {effs : List Effect.{u}} : Freer effs a → Freer (g :: effs) a
     | .Pure a => .Pure a
     | .Impure ou next => .Impure (OU.Node ou) (fun x => weaken (next x))
