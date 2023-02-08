@@ -9,17 +9,17 @@
 
 -- The basic Effect type holds a type of the possible operations/commands (usually a sum type)
 -- and the appropriate return type(s) for each possible operation.
-structure Effect.{u} : Type (u+1) where
-   (op : Type u)
-   (ret : op → Type u)
+structure Effect : Type 2 where
+   (op : Type 1)
+   (ret : op → Type)
 
 namespace Effect
 
 -- The "Open Union" contains one operation from a list of possible effects,
 -- determined at run time. This means we have to peel off .Node constructors, similar
 -- to walking a list data type.
-inductive OU : List Effect.{u} → Type u → Type (u+1) where
-    | Leaf {eff : Effect.{u}} {effs : List Effect.{u}} : (c : eff.op) → OU (eff :: effs) (eff.ret c)
+inductive OU : List Effect → Type → Type 2 where
+    | Leaf {eff : Effect} {effs : List Effect} : (c : eff.op) → OU (eff :: effs) (eff.ret c)
     | Node {eff : Effect} {effs : List Effect} : OU effs x → OU (eff :: effs) x
 
 
@@ -54,9 +54,9 @@ end Effect
 
 
 
-inductive Freer.{u} (effs : List Effect.{u}) : Type u → Type (u+1) where
+inductive Freer (effs : List Effect) : Type → Type 2 where
     | Pure : a → Freer effs a
-    | Impure : {x : Type u} → Effect.OU effs x → (x → Freer effs a) → Freer effs a
+    | Impure : {x : Type} → Effect.OU effs x → (x → Freer effs a) → Freer effs a
 
 namespace Freer
 
@@ -68,18 +68,23 @@ def send {e : Effect} {effs : List Effect} [HasEffect e effs] (sendop : e.op) : 
 
 -- Sometimes you have a monad with some effects but you need to pass it into a function
 -- with additional effects (see the Catch/Throw higher-order effect for instance).
-def weaken.{u} {g : Effect.{u}} {effs : List Effect.{u}} : Freer effs a → Freer (g :: effs) a
+def weaken {g : Effect} {effs : List Effect} : Freer effs a → Freer (g :: effs) a
     | .Pure a => .Pure a
     | .Impure ou next => .Impure (OU.Node ou) (fun x => weaken (next x))
 
-def FreerAlg.{u,v} (effs : List Effect.{u}) (a : Type v) := {x : Type u} → (OU effs x) → (x → a) → a
+def FreerAlg (effs : List Effect) (a : Type) := {x : Type} → (OU effs x) → (x → a) → a
 
-def freerCata {a : Type (u+1)} (alg : FreerAlg effs a) (w : Freer effs a) : a :=
+-- FreerAlg for a Type 1 result. We avoid "Type u" declarations since it complicates
+-- a lot of the type inference.
+def FreerAlg1 (effs : List Effect) (a : Type 1) := {x : Type} → (OU effs x) → (x → a) → a
+def FreerAlg2 (effs : List Effect) (a : Type 2) := {x : Type} → (OU effs x) → (x → a) → a
+
+def freerCata {a : Type} (alg : FreerAlg effs a) (w : Freer effs a) : a :=
     match w with
     | .Pure a => a
     | .Impure gx next => alg gx (fun x => freerCata alg (next x))
 
-def freerMap {a b : Type u} (f : a → b) (w : Freer effs a) : Freer effs b :=
+def freerMap {a b : Type} (f : a → b) (w : Freer effs a) : Freer effs b :=
     match w with
     | .Pure a => .Pure (f a)
     | .Impure gx next => .Impure gx (fun x => freerMap f (next x))
@@ -88,22 +93,30 @@ instance : Functor (Freer effs) :=
     { map := freerMap }
 
 -- foldOver is basically freerCata + freerMap
-def foldOver {a : Type u} {b : Type v} {effs : List Effect.{u}} (pf : a → b) (alg : FreerAlg.{u,v} effs b) : Freer effs a → b
+def foldOver {a : Type} {b : Type} {effs : List Effect} (pf : a → b) (alg : FreerAlg effs b) : Freer effs a → b
     | .Pure a => pf a
     | @Freer.Impure _ a _ gx next => alg gx (fun x => @foldOver a b effs pf alg (next x))
+
+def foldOver1 {a : Type} {b : Type 1} {effs : List Effect} (pf : a → b) (alg : FreerAlg1 effs b) : Freer effs a → b
+    | .Pure a => pf a
+    | @Freer.Impure _ a _ gx next => alg gx (fun x => @foldOver1 a b effs pf alg (next x))
+
+def foldOver2 {a : Type} {b : Type 2} {effs : List Effect} (pf : a → b) (alg : FreerAlg2 effs b) : Freer effs a → b
+    | .Pure a => pf a
+    | @Freer.Impure _ a _ gx next => alg gx (fun x => @foldOver2 a b effs pf alg (next x))
     
 
 /-
 -- alternate implementation of bind using a fold, similar to the "Hefty Algebras" paper
 --
 -/
-def bindFreer {a b : Type u} (m : Freer effs a) (f : a → Freer effs b) : Freer effs b :=
+def bindFreer {a b : Type} (m : Freer effs a) (f : a → Freer effs b) : Freer effs b :=
     --@foldOver a (Freer effs b) effs f .Impure m
     match m with
     | .Pure a => f a
     | .Impure gx next => Freer.Impure gx (fun z => bindFreer (next z) f)
 
-def pureFreer {α : Type u} (a : α) : Freer effs α := Freer.Pure a
+def pureFreer {α : Type} (a : α) : Freer effs α := Freer.Pure a
 
 
 
@@ -112,18 +125,20 @@ def pureFreer {α : Type u} (a : α) : Freer effs α := Freer.Pure a
 -- take inputs (a state monad for example). You can make inp Unit for no input.
 --  - a is the type returned from a Pure
 --  - b is the monad result type. It may be that a=b but not always.
-structure Handler (a : Type u) (b : Type u) (e : Effect) (effs : List Effect) (inp : Type u) where
+structure Handler (a : Type) (b : Type) (e : Effect) (effs : List Effect) (inp : Type) where
    (ret : a → inp → Freer effs b)
-   (handle : FreerAlg (e :: effs) (inp → Freer effs b))
+   (handle : FreerAlg2 (e :: effs) (inp → Freer effs b))
 
 
 -- Interpret a Freer monad. You must provide an "interpreter" which takes commands of type c
 -- and produces monads of the final type n.  This runs the interpreter on a command
 -- in the Impure constructor and combines it with the next chunk of the Freer monad
 -- by using a definition of bind for the final monad n.
-def handleFreer {a b : Type u} {e : Effect} {effs : List Effect} {inp : Type u} 
+def handleFreer {a b : Type} {e : Effect} {effs : List Effect} {inp : Type} 
     (handler : Handler a b e effs inp) (m : Freer (e :: effs) a) : inp → Freer effs b :=
-    foldOver handler.ret handler.handle m
+    match m with
+    | .Pure a => handler.ret a
+    | .Impure gx next => handler.handle gx (fun x => handleFreer handler (next x))
 
 
 -- After handling all effects, you'll have a Freer [] a left over, use

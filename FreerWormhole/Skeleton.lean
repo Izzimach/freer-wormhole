@@ -56,7 +56,7 @@ def listToNonDetFreer (targetType : Expr) (l : List Expr) : Expr :=
     | List.cons h List.nil => h
     | List.cons h t => Lean.mkAppN (Lean.mkConst ``FreerSkeleton.NonDet) #[targetType, h, listToNonDetFreer targetType t]
 
-#check HasEffect.inject
+#check Bind.bind
 
 namespace FreerSkel
 
@@ -97,18 +97,11 @@ def monadFuncs
             | .none => `(FreerSkeleton.Error "malformed command in Impure")
         ⟩,
         ⟨"bind", fun args mk => do
-            let bindId := args.get! 0
-            match bindId.getAppFn with
-            | .const n lvls => do
-                --let effs := bindId.getAppArgs.get! 0
-                let a₁ := args.get! 4
-                let a₂ := args.get! 5
-                let r₁ ← mk true #[] a₁
-                let r₂ ← mk true #[mkStrLit "bad argument"] a₂
-                `(FreerSkeleton.Bind $(TSyntax.mk r₁) $(TSyntax.mk r₂))
-            | _ => do
-                logInfo "bind isnt app"
-                `("bind isnt app")
+            let a₁ := args.get! 4
+            let a₂ := args.get! 5
+            let r₁ ← mk true #[] a₁
+            let r₂ ← mk true #[mkStrLit "bad argument"] a₂
+            `(FreerSkeleton.Bind $(TSyntax.mk r₁) $(TSyntax.mk r₂))
         ⟩,
         ⟨"Pure", fun args mk => do
             let a := args.get! 2
@@ -172,22 +165,21 @@ def monadFuncs
 --
 
 
-def noop3.{u} [HasEffect NoopEffect.{u+1} m] : Freer.{u+1} m (ULift Nat) := do noop; pure (ULift.up 3)
+def noop3 [HasEffect NoopEffect m] : Freer m Nat := do noop; pure 3
 
-def dumpArgh.{u} [HasEffect IOEffect.{u} m] : Nat → Freer.{u+1} m (ULift Nat) := fun n => do
+def dumpArgh [HasEffect IOEffect m] : Nat → Freer m Nat := fun n => do
     if h : n = 0
-    then pure (ULift.up 4)
+    then pure 4
     else do
         ioEff0 (IO.println "argh")
         dumpArgh (n-1)
 
 
-def wormHoleX.{u} : Freer.{u+1} [NoopEffect.{u+1}, IOEffect.{u}] (ULift Nat) := do
+def wormHoleX : Freer [NoopEffect, IOEffect] Nat := do
     let z ← noop3
-    --pure (ULift.up 3)
-    if z.down < 3
-        then dumpArgh.{u} 3
-        else pure (ULift.up 3)
+    if z < 3
+        then dumpArgh 3
+        else pure 3
 
 
 -- this makes the pretty-printer show universe levels
@@ -203,9 +195,8 @@ def ProcessEffects := List (String × TermElabM Syntax)
 
 def processE : ProcessEffects :=
     [
-        ⟨"NoopEffect", `(fun x => "Noop!")⟩,
-        ⟨"IOEffect", `(fun (o : StdEffs.IOX) => "IO!")⟩
-
+        ⟨"NoopEffect", `(fun (op : Type 1) (x : op) => "Noop!")⟩,
+        ⟨"IOEffect", `(fun (op : Type 1) (o : StdEffs.IOX) => "IO!")⟩
     ]
 
 def cmdX : ProcessEffects → Expr → Expr → TermElabM Syntax := fun pr eff op => do
@@ -214,21 +205,18 @@ def cmdX : ProcessEffects → Expr → Expr → TermElabM Syntax := fun pr eff o
         let eNameEnd := effName.components.getLastD "_"
         match List.lookup eNameEnd.toString pr with
         | .some fm => do
-            logInfo <| "effect:" ++ effName.toString
-            let lvl := lvls.get! 0
-            match lvl with
-            | .param n => do
-                logInfo <| "universe param: " ++ n.toString
-            | _ => pure ()
             withFreshMacroScope <| do
                 let et ← inferType op
+                let etStx ← `(?et)
                 let opStx ← `(?op)
+                let etVar ← elabTerm etStx .none
                 let opVar ← elabTerm opStx (.some et)
+                etVar.mvarId!.assign et
                 opVar.mvarId!.assign op
                 let f ← fm
-                `($(TSyntax.mk f) ?op)
-        | .none => `(FreerSkeleton.Error <| "no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
-    | _ => `(FreerSkeleton.Error "malformed effect")
+                `($(TSyntax.mk f) ?et ?op)
+        | .none => `("no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
+    | _ => `("malformed effect")
 
 def pureX : Expr → TermElabM Syntax :=
     fun e => `(Unit.unit)
@@ -236,13 +224,13 @@ def pureX : Expr → TermElabM Syntax :=
 
 genWormhole2 skeltonize >: monadFuncs (cmdX processE) pureX :<
 
-#check goWormhole2 (pure (ULift.up 3))
-#check goWormhole2 (noop3.{0} : Freer [NoopEffect] (ULift Nat))  --wormHoleX.{0}
+#check goWormhole2 (pure 3)
+#check goWormhole2 (noop3 : Freer [NoopEffect] Nat)  --wormHoleX.{0}
 #reduce goWormhole2 wormHoleX
 
-def x.{u} : FreerSkeleton String PUnit := goWormhole2 wormHoleX
+--def x : FreerSkeleton String Unit := goWormhole2 wormHoleX
 
-#reduce x
+--#reduce x
 
 --#eval goWormhole2 wormHoleX
 
@@ -265,37 +253,51 @@ def transact
         (do putH 3; pure ())
     getH
 
--- For higher-order effects (Hefty) we add to the wormhole transformers already built for Freer
-def heffTransformers := 
-    List.foldl (fun a (Prod.mk s f) => a.insert s f) FreerSkel.monadFuncs
+
+-- For higher-order effects (Hefty) we have to 
+def heffFuncs
+    (cmdTransform : Expr → Expr → TermElabM Syntax) 
+    (heffTransform : Expr → Expr → Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax)
+    (pureTransform : Expr → TermElabM Syntax) : 
+        Std.RBMap String TransformerAppSyntax compare :=
+    let baseFuncs := FreerSkel.monadFuncs cmdTransform pureTransform
+    List.foldl (fun a (Prod.mk s f) => a.insert s f) baseFuncs
         [
         ⟨"hLift", fun args mk => do
-            `(FreerSkeleton.Pure "hLift")
+            let eff := args.get! 0
+            let op := args.get! 3
+            let v ← cmdTransform eff op
+            `(FreerSkeleton.Command $(TSyntax.mk v))
         ⟩,
-        ⟨"catchH", fun args mk => do
+        ⟨"hSend", fun args mk => do
             logInfo args
-            let tryE ← mk true #[] (args.get! 3)
-            let catchE ← mk true #[] (args.get! 4)
-            --let resultSyn ← `(FreerSkeleton.Pure "?")
-            --let resultExpr ← elabType resultSyn
-            let skelType := mkAppN (mkConst ``FreerSkeleton [.zero]) #[mkConst ``String]
-            let lNil := mkAppN (mkConst ``List.nil [.zero]) #[skelType]
-            --let node2 ← mkAppM ``List.cons #[catchE,lNil]
-            --let node1 ← mkAppM ``List.cons #[tryE, node2]
-            --let subnodes := mkAppN (mkConst ``List.cons [.zero]) #[tryE, mkAppN (mkConst ``List.cons [.zero]) #[catchE, mkConst ``List.nil]]
-            --pure <| mkAppN (mkConst ``FreerSkeleton.Heff [.zero]) #[mkConst ``String, mkStrLit "catch", node1]
-            `(FreerSkeleton.Pure "catchH")
+            let heff := args.get! 1
+            let cmd := args.get! 3
+            let fork := args.get! 4
+            let v ← heffTransform heff cmd fork mk
+            `(FreerSkeleton.Command $(TSyntax.mk v))
         ⟩,
         ⟨"hBind", fun args mk => do
-            --pure <| mkAppN (mkConst ``FreerSkeleton.Pure) #[mkStrLit "hBind"]
-            `(FreerSkeleton.Pure "hBind")
+            let a₁ := args.get! 3
+            let a₂ := args.get! 4
+            let r₁ ← mk true #[] a₁
+            let r₂ ← mk true #[mkStrLit "bad argument"] a₂
+            `(FreerSkeleton.Bind $(TSyntax.mk r₁) $(TSyntax.mk r₂))
         ⟩
         ]
 
-genWormhole2 skeltonize >: heffTransformers :<
+def heffX (heff : Expr) (cmd : Expr) (fork : Expr) (rec : (a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) : TermElabM Syntax :=
+    `("heffX")
 
-#check goWormhole2 (pure (ULift.up 3) : Freer.{1} [IOEffect] (ULift Nat))
+def processE : List (String × TermElabM Syntax) :=
+    [
+        ⟨"StateEff", `(fun op (x : op) => "StateEff")⟩-- match x with | StateOp.Put _ => "PutState" | StateOp.Get => "GetState")⟩
+    ]
 
---#eval goWormhole2 (@transact [CatchHEff (onlyRet Unit), hLifted ThrowEff, hLifted (StateEff Nat)])
+genWormhole2 skeltonize >: heffFuncs (FreerSkel.cmdX processE) heffX FreerSkel.pureX :<
+
+#check goWormhole2 (pure 3 : Freer [IOEffect] Nat)
+
+#reduce goWormhole2 (@transact [CatchHEff (onlyRet PUnit), hLifted ThrowEff, hLifted (StateEff Nat)] _ _ _)
 
 namespace HEffSkel

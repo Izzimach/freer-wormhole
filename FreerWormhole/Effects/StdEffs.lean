@@ -11,42 +11,42 @@ open Freer Effect HEffect
 -- Standard State Effect, with get and put
 --
 
-inductive StateOp.{u} (a : Type u) : Type u where
+inductive StateOp (a : Type) : Type 1 where
     | Put : a → StateOp a 
     | Get : StateOp a
 
-def StateEff.{u} (a : Type u) : Effect.{u} :=
+def StateEff (a : Type) : Effect :=
     {
         op := StateOp a,
         ret := fun op => match op with
-                         | .Put _ => PUnit
+                         | .Put _ => Unit
                          | .Get   => a
     }
 
-def stateHandler {s : Type u} : Handler.{u} a (a × s) (StateEff s) effs s :=
+def stateHandler {s : Type} : Handler a (a × s) (StateEff s) effs s :=
     {
         ret := fun a s => Freer.Pure ⟨a,s⟩,
         handle := fun ou next s =>
             match ou with
             | .Leaf l => match l with
-                         | .Put x => next PUnit.unit x
+                         | .Put x => next () x
                          | .Get   => next s s
             | .Node ou' => .Impure ou' (fun x => next x s)
     }
 
-def runState {s x : Type u} (init : s) : Freer (StateEff s :: effs) x → Freer effs (x × s) :=
+def runState {s x : Type} (init : s) : Freer (StateEff s :: effs) x → Freer effs (x × s) :=
     fun m => handleFreer (@stateHandler x effs s ) m init
 
-def get {s : Type u} {effs : List Effect} [HasEffect (StateEff s) effs] : Freer effs ((StateEff s).ret StateOp.Get) :=
+def get {s : Type} {effs : List Effect} [HasEffect (StateEff s) effs] : Freer effs ((StateEff s).ret StateOp.Get) :=
     @send (StateEff s) effs _ StateOp.Get
 
-def getH { s : Type u} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] : Hefty heffs s :=
+def getH { s : Type} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] : Hefty heffs s :=
     @hLift (StateEff s) _ _ StateOp.Get
 
-def put {s : Type u} {effs : List Effect} [HasEffect (StateEff s) effs] (x : s) : Freer effs ((StateEff s).ret (StateOp.Put x)) :=
+def put {s : Type} {effs : List Effect} [HasEffect (StateEff s) effs] (x : s) : Freer effs ((StateEff s).ret (StateOp.Put x)) :=
     @send (StateEff s) effs _ (StateOp.Put x)
 
-def putH {s : Type u} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] (x : s) : Hefty heffs PUnit :=
+def putH {s : Type} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) heffs] (x : s) : Hefty heffs Unit :=
     @hLift (StateEff s) _ _ (StateOp.Put x)
 
 
@@ -60,13 +60,13 @@ def putH {s : Type u} {heffs : List HEffect} [HasHEffect (hLifted (StateEff s)) 
 inductive Noop : Type u where
     | Noop
 
-def NoopEffect.{u} : Effect.{u} :=
+def NoopEffect : Effect :=
     {
         op := Noop,
         ret := fun _ => PUnit
     }
 
-def noopEffHandler.{u} {a : Type u} : Handler a a NoopEffect.{u} effs PUnit :=
+def noopEffHandler {a : Type} : Handler a a NoopEffect effs PUnit :=
     {
         ret := fun a _ => Freer.Pure a,
         handle := fun ou next _ =>
@@ -79,52 +79,51 @@ def runNoopEff {effs : List Effect} : Freer (NoopEffect :: effs) x → Freer eff
     fun m => handleFreer (@noopEffHandler effs x) m PUnit.unit
 
 
-def noop.{u} {effs : List Effect.{u}} [HasEffect NoopEffect effs] : Freer.{u} effs PUnit :=
+def noop {effs : List Effect} [HasEffect NoopEffect effs] : Freer effs PUnit :=
     @send NoopEffect effs _ Noop.Noop
 
 def noopH {heffs : List HEffect} [HasHEffect (hLifted NoopEffect) heffs] : Hefty heffs PUnit :=
-    @hLift NoopEffect _ _ Noop.Noop
+    @hLift NoopEffect heffs _ Noop.Noop
 
 --
 -- A generic IO effect to run an (mostly?) arbitrary IO effect
 --
 
 
-inductive IOX.{u} : Type (u+1) where
+inductive IOX : Type 1 where
     | IOOp : (a : Type) → IO a → IOX
 
-def IOEffect.{u} : Effect.{u+1} :=
+def IOEffect : Effect :=
     {
-        op := IOX.{u},
+        op := IOX,
         ret := fun z => match z with
-                        | IOX.IOOp a m => ULift a
+                        | IOX.IOOp a m => a
     }
 
-def runIOEff {a : Type} : Freer [IOEffect] (ULift a) → IO a
-    | .Pure a => pure a.down
+def runIOEff {a : Type} : Freer [IOEffect] a → IO a
+    | .Pure a => pure a
     | .Impure (.Leaf l) next =>
         match l with
-        | .IOOp _ m =>    m >>= (fun x => runIOEff (next (ULift.up x)))
+        | .IOOp _ m =>    m >>= (fun x => runIOEff (next x))
 
 -- special case of runIOEff for Unit, because of odd lifting
 def runIOEffUnit : Freer [IOEffect] PUnit → IO Unit
     | .Pure _ => pure ()
     | .Impure (.Leaf l) next =>
         match l with
-        | .IOOp _ m =>    m >>= (fun x => runIOEffUnit (next (ULift.up x)))
+        | .IOOp _ m =>    m >>= (fun x => runIOEffUnit (next x))
 
-def ioEff0.{u} {a : Type} {effs : List Effect.{u+1}} [HasEffect IOEffect.{u} effs] (m : IO a) : Freer effs PUnit :=
+def ioEff0 {a : Type} {effs : List Effect} [HasEffect IOEffect effs] (m : IO a) : Freer effs PUnit :=
     Freer.Impure (@HasEffect.inject IOEffect effs _ <| IOX.IOOp a m) (fun x => Freer.Pure PUnit.unit)
 
--- Lean can infer universes but I keep them explicit to reflect the relation between IOEffect.{u} and other effects Effect.{u+1}
-def ioEff.{u} {a : Type} {effs : List Effect.{u+1}} [HasEffect IOEffect.{u} effs] (m : IO a) : Freer effs (ULift a) :=
+def ioEff {a : Type} {effs : List Effect} [HasEffect IOEffect effs] (m : IO a) : Freer effs a :=
     Freer.Impure (@HasEffect.inject IOEffect effs _ <| IOX.IOOp a m) (fun x => Freer.Pure x)
 
 
-def ioEffH0.{u} {heffs : List HEffect.{u+1}} [HasHEffect (hLifted IOEffect.{u}) heffs] (m : IO Unit) : Hefty heffs PUnit :=
+def ioEffH0 {heffs : List HEffect} [HasHEffect (hLifted IOEffect) heffs] (m : IO Unit) : Hefty heffs Unit :=
     hBind (@hLift IOEffect heffs _ (IOX.IOOp Unit m)) (fun _ => hPure PUnit.unit)
 
-def ioEffH.{u} {a : Type} {heffs : List HEffect.{u+1}} [HasHEffect (hLifted IOEffect.{u}) heffs] (m : IO a) : Hefty heffs (ULift a) :=
+def ioEffH {a : Type} {heffs : List HEffect} [HasHEffect (hLifted IOEffect) heffs] (m : IO a) : Hefty heffs a :=
     @hLift IOEffect heffs _ (IOX.IOOp a m)
 
 end StdEffs
@@ -137,7 +136,7 @@ open Freer Effect HEffect
 inductive ThrowOp : Type u where
     | Throw : String → ThrowOp
 
-def ThrowEff : Effect.{u} :=
+def ThrowEff : Effect :=
     {
         op := ThrowOp,
         ret := fun _ => ULift <| Fin 0
@@ -161,12 +160,12 @@ def throwH {heffs : List HEffect} [HasHEffect (hLifted ThrowEff) heffs] : Hefty 
 
 
 -- "Universe-of-Types" basically mapping from values in one type to types in that same universe
-structure UoT : Type (u+1) where
-    (choice : Type u)
-    (uotResult : choice → Type u)
+structure UoT : Type 1 where
+    (choice : Type)
+    (uotResult : choice → Type)
 
 -- Used with catch; (CatchHEff (onlyRet a)) is a try/catch that always return a, on success OR failure
-def onlyRet (a : Type u) : UoT.{u} :=
+def onlyRet (a : Type) : UoT :=
     {
         choice := PUnit,
         uotResult := fun _ => a
@@ -174,14 +173,14 @@ def onlyRet (a : Type u) : UoT.{u} :=
 
 
 
-inductive CatchOp.{u} (catchDispatch : UoT.{u}) : Type u where
+inductive CatchOp (catchDispatch : UoT) : Type u where
     | Catch : catchDispatch.choice → CatchOp catchDispatch
 
 inductive ExceptResult : Type u where
     | Success : ExceptResult
     | Failure : ExceptResult
 
-def CatchFork (a : Type u) : Effect.{u} :=
+def CatchFork (a : Type) : Effect :=
     {
         -- possible values to pass to the fork, to choose which fork
         op := ExceptResult,
@@ -191,22 +190,20 @@ def CatchFork (a : Type u) : Effect.{u} :=
                         | .Failure => a
     }
 
-def CatchHEff.{u} (dispatch : UoT.{u}) : HEffect.{u} :=
+def CatchHEff (dispatch : UoT) : HEffect :=
     {
         cmd := CatchOp dispatch,
         fork := fun op => CatchFork (dispatch.uotResult op.1),
         retH := fun e => dispatch.uotResult e.1
     }
 
-def catchH {result : Type u} {heffs : List HEffect} [HasHEffect (CatchHEff.{u} (onlyRet result)) heffs] 
+def catchH {result : Type} {heffs : List HEffect} [HasHEffect (CatchHEff (onlyRet result)) heffs] 
       (run : Hefty heffs result)
       (onError : Hefty heffs result) : Hefty heffs result :=
-    Hefty.Impure
-        (@HasHEffect.inject (CatchHEff (onlyRet result)) heffs _ (CatchOp.Catch PUnit.unit))
+    @hSend heffs (CatchHEff (onlyRet result)) _ (CatchOp.Catch PUnit.unit)
         (fun pz => match pz with
-                   | .Success => run
+                   | ExceptResult.Success => run
                    | .Failure => onError)
-        (fun z => hPure z)
 
 
 def eCatch : Elaboration [CatchHEff (onlyRet Nat)] (ThrowEff :: effs) :=
