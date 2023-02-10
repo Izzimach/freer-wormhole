@@ -113,15 +113,9 @@ def runIOEffUnit : Freer [IOEffect] PUnit → IO Unit
         match l with
         | .IOOp _ m =>    m >>= (fun x => runIOEffUnit (next x))
 
-def ioEff0 {a : Type} {effs : List Effect} [HasEffect IOEffect effs] (m : IO a) : Freer effs PUnit :=
-    Freer.Impure (@HasEffect.inject IOEffect effs _ <| IOX.IOOp a m) (fun x => Freer.Pure PUnit.unit)
-
 def ioEff {a : Type} {effs : List Effect} [HasEffect IOEffect effs] (m : IO a) : Freer effs a :=
-    Freer.Impure (@HasEffect.inject IOEffect effs _ <| IOX.IOOp a m) (fun x => Freer.Pure x)
+    @send IOEffect effs _ (IOX.IOOp a m)
 
-
-def ioEffH0 {heffs : List HEffect} [HasHEffect (hLifted IOEffect) heffs] (m : IO Unit) : Hefty heffs Unit :=
-    hBind (@hLift IOEffect heffs _ (IOX.IOOp Unit m)) (fun _ => hPure PUnit.unit)
 
 def ioEffH {a : Type} {heffs : List HEffect} [HasHEffect (hLifted IOEffect) heffs] (m : IO a) : Hefty heffs a :=
     @hLift IOEffect heffs _ (IOX.IOOp a m)
@@ -173,10 +167,10 @@ def onlyRet (a : Type) : UoT :=
 
 
 
-inductive CatchOp (catchDispatch : UoT) : Type u where
+inductive CatchOp (catchDispatch : UoT) : Type 1 where
     | Catch : catchDispatch.choice → CatchOp catchDispatch
 
-inductive ExceptResult : Type u where
+inductive ExceptResult : Type 1 where
     | Success : ExceptResult
     | Failure : ExceptResult
 
@@ -205,17 +199,6 @@ def catchH {result : Type} {heffs : List HEffect} [HasHEffect (CatchHEff (onlyRe
                    | ExceptResult.Success => run
                    | .Failure => onError)
 
-
-def eCatch : Elaboration [CatchHEff (onlyRet Nat)] (ThrowEff :: effs) :=
-    fun op phi next => match op with
-                       | .Leaf c => match c with
-                                    | .Catch v => let m₁ := phi .Success
-                                                  let m₂ := phi .Failure
-                                                  let r₁ := runThrow m₁
-                                                  let r₂ := fun (z : Option _) => match z with
-                                                                     | Option.none => bindFreer m₂ next
-                                                                     | Option.some x => next x
-                                                  (weaken r₁) >>= r₂
 
 
 def elabCatch : Elab1 (CatchHEff (onlyRet Unit)) heffs (ThrowEff :: effs) :=
@@ -267,10 +250,10 @@ def runTransact : Freer [ThrowEff, StateEff Nat] a → (Option a × Nat) :=
 #eval runTransact <| elaborate elabTransact <| transact
 
 def printArghs [HasHEffect (hLifted IOEffect) heffs] [HasHEffect (hLifted NoopEffect) heffs] : Hefty heffs PUnit := do
-    ioEffH0 (IO.println "argh")
-    ioEffH0 (IO.println "argh")
+    ioEffH (IO.println "argh")
+    ioEffH (IO.println "argh")
     noopH
-    ioEffH0 (IO.println "argh")
+    ioEffH (IO.println "argh")
 
 -- Higher order effects need an elaboration phase followed by a run phase.
 -- Here we defined the elaboration phase.
