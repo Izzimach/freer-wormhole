@@ -18,12 +18,11 @@ def goExpr (t : Expr) (indent : Nat) : MetaM Unit := do
   | bvar ix => dumpX <| "bvar=" ++ toString ix
   | fvar fid => dumpX <| "fvar=" ++ toString fid.name
   | mvar mid => dumpX <| "mvar=" ++ toString mid.name
-  | sort lvl => dumpX <| "sort"
-  | const n levels => dumpX <| "const=" ++ n.toString
+  | sort _ => dumpX <| "sort"
+  | const n _ => dumpX <| "const=" ++ n.toString
   | app f arg => dumpX "app "; goExpr f (indent+1); goExpr arg (indent+1)
   | lam n arg body _ => dumpX ("lam > " ++ n.toString); goExpr arg (indent+1); goExpr body (indent+1)
   | forallE n a b _ => dumpX ("forall " ++ n.toString); goExpr a (indent+1); goExpr b (indent+1)
---  | letE n t v b => dumpX ("let " ++ n.toString); goExpr t (indent+1); goExpr v (indent+1); goExpr (b.instantiate1 v) (indent+1)
   | letE n t v b _ => do
       dumpX ("let " ++ n.toString)
       goExpr t (indent+1)
@@ -31,13 +30,13 @@ def goExpr (t : Expr) (indent : Nat) : MetaM Unit := do
       goExpr b (indent+1)
   | lit (Literal.natVal n) => dumpX <| "lit=" ++ toString n
   | lit (Literal.strVal s) => dumpX <| "lit=" ++ s
-  | mdata md e => dumpX "mdata"
-  | proj n ix e => dumpX "proj"
+  | mdata _md _e => dumpX "mdata"
+  | proj _n _ix _e => dumpX "proj"
 
 
 def walkExpr (thing : Syntax) : TermElabM Expr := do
   let thingExpr ← elabTerm thing Option.none
-  let e ← getEnv
+  let _e ← getEnv
   let et ← inferType thingExpr
   IO.println "thing type: "
   goExpr et 0
@@ -50,7 +49,7 @@ def walkExpr (thing : Syntax) : TermElabM Expr := do
 -- The forall value in a type is basically an argument: forall x (forall y z) is "x → y → z"
 -- This takes the set of nested foralls and breaks them into a list of argument types
 def unfoldForalls : Expr → List Expr
-| forallE n a rest _ => a :: unfoldForalls rest
+| forallE _n a rest _ => a :: unfoldForalls rest
 | x => [x]
 
 -- given some name from a ConstantInfo returns true if this is a match call (match_1, match_2, etc.)
@@ -79,7 +78,7 @@ def wormholePure {applyTransformers : Bool} (message : String) : TermElabM (worm
 def TransformerAppSyntax : Type := Array Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax
 
 -- wormhole re-written to find function applications
-partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax compare) (applyTransformers : Bool) (argStack : Array Expr) (e : Expr) : TermElabM (wormholeResult applyTransformers) := do
+partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare) (applyTransformers : Bool) (argStack : Array Expr) (e : Expr) : TermElabM (wormholeResult applyTransformers) := do
     let e ← instantiateMVars e
     match e with
     | .app _ _ => do
@@ -98,12 +97,12 @@ partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax comp
             match tr with
             | .some tf => match applyTransformers with
                 | false => do
-                    logInfo <| "stopping unfold at " ++ n.toString
+                    --logInfo <| "stopping unfold at " ++ n.toString
                     pure e
                 | true => do
                     let tresult ← tf argStack (wormhole2 transformers)
-                    logInfo <| "transform result for " ++ n.toString ++ " :"
-                    logInfo tresult
+                    --logInfo <| "transform result for " ++ n.toString ++ " :"
+                    --logInfo tresult
                     pure tresult
             | .none => do
                 let env ← getEnv
@@ -121,79 +120,80 @@ partial def wormhole2 (transformers : Std.RBMap String TransformerAppSyntax comp
                              | false =>  pure <| mkAppN e argStack
                         else wormholePure <| "No value for const - " ++ c.toString
                     | Option.some s => wormhole2 transformers applyTransformers argStack s
-    | .lam bn bt body bi => do
-        logInfo <| "lambda, arg name=" ++ bn.toString ++ ", args=" ++ argStack.toList.toString
+    | .lam bn _bt body _bi => do
+        --logInfo <| "lambda, arg name=" ++ bn.toString ++ ", args=" ++ argStack.toList.toString
         if argStack.size = 0
         then do
-            logInfo "no args for lambda"
+            --logInfo "no args for lambda"
             wormhole2 transformers applyTransformers #[] body
         else do
             let result := e.beta argStack
-            logInfo "beta reduce result:"
-            logInfo result
+            --logInfo "beta reduce result:"
+            --logInfo result
             --pure <| mkStrLit "lambda"
             wormhole2 transformers applyTransformers #[] result
-    | proj ty idx struct => do
-        logInfo <| "index for project : " ++ (toString idx)
-        logInfo struct
+    | proj _ty idx struct => do
+        --logInfo <| "index for project : " ++ (toString idx)
+        --logInfo struct
         -- for a projection we need to lookup the struct and then find the relevant field
         let structVal ← wormhole2 transformers false argStack struct
         let structType ← inferType struct
-        logInfo "struct after transform:"
+        --logInfo "struct after transform:"
         --logInfo <| (structVal : Expr)
-        logInfo structType
+        --logInfo structType
         let env ← getEnv
         let structName := structType.getAppFn
         let structArgs := structVal.getAppArgs
-        logInfo <| "structname: " ++ structName
+        --logInfo <| "structname: " ++ structName
         match structName with
         | .const c _ => do
             match env.find? c with
             | .some (.ctorInfo cval) => do
-                logInfo "struct ctor info: "
-                logInfo <| toString cval.cidx
+                --logInfo "struct ctor info: "
+                --logInfo <| toString cval.cidx
                 wormholePure "struct was constructor, oops"
             | .some (.inductInfo ival) => do
-                logInfo <| "inductive name : " ++ toString ival.name
-                logInfo <| String.intercalate "/" <| ival.ctors.map toString
-                logInfo <| "nParams=" ++ toString ival.numParams ++ " nIndices=" ++ toString ival.numIndices
+                --logInfo <| "inductive name : " ++ toString ival.name
+                --logInfo <| String.intercalate "/" <| ival.ctors.map toString
+                --logInfo <| "nParams=" ++ toString ival.numParams ++ " nIndices=" ++ toString ival.numIndices
                 match env.find? (ival.ctors.get! 0) with
                 | .some (.ctorInfo cinfo) => do
-                    logInfo <| "cinfo fields=" ++ toString cinfo.numFields
-                    logInfo <| "cinfo params=" ++ toString cinfo.numParams
+                    --logInfo <| "cinfo fields=" ++ toString cinfo.numFields
+                    --logInfo <| "cinfo params=" ++ toString cinfo.numParams
                     let structFields := List.take cinfo.numFields <| structArgs.toList.drop cinfo.numParams
                     let projResult := structFields.get! idx
                     let reducedArgs := structArgs.toList.drop (cinfo.numParams + cinfo.numFields)
                     let projExpr := mkAppN projResult (reducedArgs.toArray)
-                    logInfo <| "after projection: "
-                    logInfo projExpr
+                    --logInfo <| "after projection: "
+                    --logInfo projExpr
                     wormhole2 transformers applyTransformers #[] projExpr
                 | _ => wormholePure "invalid struct contructor"
             | _ => wormholePure <| "invalid lookup of struct " ++ toString c
         | _ => wormholePure "struct has no name"
     | fvar _ => do
-        logInfo <| "don't know what to do with fvar:" ++ toString e
+        --logInfo <| "don't know what to do with fvar:" ++ toString e
         wormholePure "fvar"
     | mvar vid => do
-        logInfo <| "don't know what to do with mvar:" ++ toString e
+        --logInfo <| "don't know what to do with mvar:" ++ toString e
         let mc ← getMCtx
         let inf ← vid.getDecl
-        logInfo <| "mvar decl: " ++ inf.type
-        logInfo <| "metacontext size : " ++ toString (mc.decls.size)
-        mc.decls.forM <| fun i d => do 
-            logInfo (i.name)
+        --logInfo <| "mvar decl: " ++ inf.type
+        --logInfo <| "metacontext size : " ++ toString (mc.decls.size)
+        mc.decls.forM <| fun i _ => do 
+            --logInfo (i.name)
             match mc.findDecl? i with
             | .some v => do
-                logInfo <| "decl: " ++ toString v.lctx.size
+                /-logInfo <| "decl: " ++ toString v.lctx.size
                 v.lctx.forM <| fun l => do
-                    logInfo <| "local decl: " ++ toString l.fvarId.name
+                    logInfo <| "local decl: " ++ toString l.fvarId.name-/
+                pure ()
             | .none=> pure ()
         wormholePure "mvar"
     | sort _ => do
-        logInfo <| "don't know what to do with sort:" ++ toString e
+        --logInfo <| "don't know what to do with sort:" ++ toString e
         wormholePure "sort"
     | mdata _ _ => do
-        logInfo <| "don't know what to do with mdata:" ++ toString e
+        ---logInfo <| "don't know what to do with mdata:" ++ toString e
         wormholePure "mdata"
     | _ => do
         logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
@@ -206,7 +206,7 @@ syntax (name := wormholed) "goWormhole2" term : term
 set_option hygiene false in
 elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command => do
     let skelCommand ← 
-        `(@[termElab Wormhole.wormholed]
+        `(@[term_elab Wormhole.wormholed]
           def $wormholeName : TermElab := fun stx _ => do
               let e ← elabTerm (Syntax.getArg stx 1) Option.none
               logInfo e
@@ -218,11 +218,10 @@ elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command =
     elabCommand skelCommand
 
 
-genWormhole2 ww >: Std.RBMap.empty :<
-
-set_option pp.explicit true
-
-#eval goWormhole2 ((3 : Nat) + 3)
-#eval goWormhole2 (fun x => match x with |Nat.zero => 0 |Nat.succ _ => 1)
+--genWormhole2 yy >: RBMap.empty :<
+--set_option pp.explicit true
+--#eval goWormhole2 ((3 : Nat) + 3)
+--def y :=  (fun x => match x with |Nat.zero => 0 | Nat.succ _ => 1)
+--#eval goWormhole2 ((fun x => match x with |Nat.zero => 0 | _ => 1) : Nat → Nat) 
 
 end Wormhole
