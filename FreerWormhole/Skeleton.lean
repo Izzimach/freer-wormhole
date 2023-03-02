@@ -13,8 +13,6 @@ import FreerWormhole.Effects.StdEffs
 
 import FreerWormhole.Wormhole
 
-open Std.RBMap
-
 open Lean Elab Command Meta Term
 
 open Freer Effect HEffect Wormhole StdEffs
@@ -34,7 +32,6 @@ inductive FreerSkeleton (c t : Type) : Type where
 | Recurse : String → FreerSkeleton c t
     deriving Repr
 
-mutual
 
 def dumpFreerSkeleton [ToString c] [ToString t]: FreerSkeleton c t → String
     | .Error e => "Error : " ++ e
@@ -46,7 +43,9 @@ def dumpFreerSkeleton [ToString c] [ToString t]: FreerSkeleton c t → String
     | .Recursive s r => "{{Recursive " ++ s ++ " :: " ++ dumpFreerSkeleton r ++ "}}"
     | .Recurse s => "Call Recurse //" ++ s++ "//"
 
-end
+
+
+namespace FreerSkel
 
 instance [ToString c] [ToString t] : ToString (FreerSkeleton c t) where
     toString := dumpFreerSkeleton
@@ -57,28 +56,11 @@ def listToNonDetFreer (targetType : Expr) (l : List Expr) : Expr :=
     | List.cons h List.nil => h
     | List.cons h t => Lean.mkAppN (Lean.mkConst ``FreerSkeleton.NonDet) #[targetType, h, listToNonDetFreer targetType t]
 
-#check Bind.bind
-
-namespace FreerSkel
-
--- given an expression of type "OU effs x" this extracts the effect and op
-def unpackOU : Expr → TermElabM (Option (Expr × Expr)) := fun e =>
-    match e.getAppFn with
-    | .const c lvls => 
-        if c.components.any (fun n => n == "inject")
-        then do
-            let args := e.getAppArgs
-            let eff := args.get! 0
-            let cmd ← instantiateMVars <| args.get! 3
-            pure <| .some ⟨eff,cmd⟩
-        else pure <| .none
-    | _ => pure .none
-
 def monadFuncs
     (cmdTransform : Expr → Expr → TermElabM Syntax) 
     (pureTransform : Expr → TermElabM Syntax) : 
-        Std.RBMap String TransformerAppSyntax compare :=
-    Std.RBMap.ofList
+        RBMap String TransformerAppSyntax compare :=
+    RBMap.ofList
     [
         ⟨"send", fun args mk => do
             let eff := args.get! 0
@@ -162,8 +144,8 @@ set_option pp.universes true
 set_option pp.fullNames true
 
 
-#eval walkExpr ((do ioEff (IO.println "argh"); pure (ULift.up 4)) : Freer [IOEffect] (ULift Nat))
-#eval walkExpr (noop : Freer [NoopEffect,IOEffect] PUnit)
+--#eval walkExpr ((do ioEff (IO.println "argh"); pure (ULift.up 4)) : Freer [IOEffect] (ULift Nat))
+--#eval walkExpr (noop : Freer [NoopEffect,IOEffect] PUnit)
 
 
 
@@ -198,7 +180,7 @@ def pureX : Expr → TermElabM Syntax :=
     fun e => `(Unit.unit)
 
 
-genWormhole2 skeltonize >: monadFuncs (cmdX processE) pureX :<
+genWormhole2 xx >: monadFuncs (cmdX processE) pureX :<
 
 #check goWormhole2 (pure 3)
 #check goWormhole2 (noop3 : Freer [NoopEffect] Nat)  --wormHoleX.{0}
@@ -240,7 +222,7 @@ def heffFuncs
     (cmdTransform : Expr → Expr → TermElabM Syntax) 
     (heffTransform : Expr → Expr → Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax)
     (pureTransform : Expr → TermElabM Syntax) : 
-        Std.RBMap String TransformerAppSyntax compare :=
+        RBMap String TransformerAppSyntax compare :=
     let baseFuncs := FreerSkel.monadFuncs cmdTransform pureTransform
     List.foldl (fun a (Prod.mk s f) => a.insert s f) baseFuncs
         [
@@ -326,7 +308,7 @@ def processHE : List (String × ProcessHEff) :=
             | .none => `(HCommand.HCommand "catchEff?" #[])⟩
     ]
 
-genWormhole2 skeltonize >: heffFuncs (FreerSkel.cmdX processE) (heffX processHE) FreerSkel.pureX :<
+genWormhole2 hskel >: heffFuncs (FreerSkel.cmdX processE) (heffX processHE) FreerSkel.pureX :<
 
 #check goWormhole2 (pure 3 : Freer [IOEffect] Nat)
 
@@ -337,4 +319,4 @@ def xW : FreerSkeleton (HCommand Unit) Unit :=
 
 #eval xW
 
-namespace HEffSkel
+end HEffSkel
