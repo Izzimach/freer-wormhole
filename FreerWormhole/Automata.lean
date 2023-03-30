@@ -79,7 +79,16 @@ def exoNode (exoLabel : String) : AltAutomata :=
     { zeroNode with exoTransitions := RBMap.fromList [⟨exoLabel,[0]⟩] compare }
 
 def recurseNode (exoLabel : String) : AltAutomata :=
-    { labeledNode "recurse" with exoTransitions := RBMap.fromList [⟨exoLabel,[0]⟩] compare }
+    {
+        fsm :=
+        {
+            toLabeledGraph := fromExplicit <|
+                compileGraph [⟨0,[]⟩] []
+            startStates := [0],
+            endStates := []
+        },
+        exoTransitions := RBMap.fromList [⟨exoLabel,[0]⟩] compare
+    }
 
 def mapRBMap (m : RBMap k v c) (f : v → x) : RBMap k x c :=
     m.fold 
@@ -97,13 +106,25 @@ def mergeRBMap (a b : RBMap k v c) (mergeVals : v → v → v) : RBMap k v c :=
 -- sequences automata A then B, merging exoTransitions
 def sequenceAutomata : AltAutomata → AltAutomata → AltAutomata
 | ⟨fsm₁, exo₁⟩, ⟨fsm₂, exo₂⟩ =>
-    let ⟨fsm, remapping⟩ := FSM.compactFSMWithMapping <| FSM.sequenceFSMs fsm₁ fsm₂
+    -- when we sequence the start nodes of fsm₂ get "overwritten" by end nodes of fsm₁, so
+    -- we look at the exo nodes of fsm₂. If any are start nodes, we record so those so that we cann
+    -- add those exo labels to all end states of fsm₁
+    let fsm₃ := FSM.sequenceFSMs fsm₁ fsm₂
+    let skippedexo := mapRBMap exo₂ (fun v => v.filter (fun n => fsm₂.startStates.contains n))
+    let ⟨fsm, remapping⟩ := FSM.compactFSMWithMapping <| fsm₃
     -- exo₁ is Left, exo₂ is Right
     let exo₁ := mapRBMap exo₁ (fun l => l.filterMap (fun n => remapping (Basic.OSum.Left n)))
     let exo₂ := mapRBMap exo₂ (fun l => l.filterMap (fun n => remapping (Basic.OSum.Right n)))
+    -- any skipped exos? add those labels to nodes that were the endstates of fsm₁
+    let endStates1 := fsm₁.endStates.filterMap (fun n => remapping (Basic.OSum.Left n))
+    let exoX := mapRBMap skippedexo <|
+        fun l => if l.length == 0
+                 then []
+                 else endStates1
+    let mergeExo := fun a b => mergeRBMap a b (fun x y => List.eraseDups <| x ++ y)
     {
         fsm := fsm,
-        exoTransitions := mergeRBMap exo₁ exo₂ HAppend.hAppend
+        exoTransitions := mergeExo exo₁ (mergeExo exo₂ exoX)
     }
 
 -- if/then branch into two automata
@@ -126,7 +147,7 @@ def branchAutomata : AltAutomata → AltAutomata → AltAutomata
  exoTransitions set. You can give these recursive edges a label (or use "" for no label).
 -/
 def reifyRecursion (a : AltAutomata) (recurseId : String) (label : String) : AltAutomata :=
-    let ⟨fsm,exo⟩ := sequenceAutomata (labeledNode "rec") a
+    let ⟨fsm,exo⟩ := sequenceAutomata (labeledNode "recurseHead") a
     let ⟨exo, recursors⟩ := pullExo exo recurseId
     -- we need to convert to an explicit graph to add edges. We'll convert back to a LabeledGraph at the end
     -- using 'fromExplicit'
@@ -255,14 +276,17 @@ def monadFuncs
 
 def ProcessEffects := List (String × TermElabM Syntax)
 
-def processE : ProcessEffects :=
+def exampleProcessors : ProcessEffects :=
     [
         ⟨"NoopEffect", `(fun (op : Type 1) (x : op) => zeroNode)⟩,
         ⟨"IOEffect", `(fun (op : Type 1) (o : StdEffs.IOX) => labeledNode "IO!")⟩,
         ⟨"AutomataLabel", `(fun (op : Type 1) (x : VertexLabelCommand) => labeledNode x.1)⟩
     ]
 
-def cmdAutomata : ProcessEffects →  Expr → Expr → TermElabM Syntax := fun pr eff op => do
+-- given some processors to process different effects (ProcessEffects) this will
+-- look at the effect and operator passed in and try to apply the appropriate
+-- processor.
+def processOps : ProcessEffects → Expr → Expr → TermElabM Syntax := fun pr eff op => do
     match eff.getAppFn with
     | .const effName lvls => do
         let eNameEnd := effName.components.getLastD "_"
@@ -281,23 +305,25 @@ def cmdAutomata : ProcessEffects →  Expr → Expr → TermElabM Syntax := fun 
         | .none => `("no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
     | _ => `("malformed effect")
 
-def pureX : Expr → TermElabM Syntax :=
+def processPure : Expr → TermElabM Syntax :=
     fun e => `(zeroNode)
 
 
 -- final monad implementing the state and IO
-genWormhole2 genFSM >: monadFuncs (cmdAutomata processE) pureX :<
+genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
 
 def dumpArgh [HasEffect IOEffect m] : Freer m Nat := do
     ioEff (IO.println "argh")
     pure 4
 
-def if3 [HasEffect NoopEffect m] [HasEffect AutomataLabel m] [HasEffect IOEffect m] : Nat →  Freer m Nat :=
+def if3 [HasEffect NoopEffect m] [HasEffect IOEffect m] : Nat →  Freer m Nat :=
     fun z => do
         noop
         if z = 0
         then dumpArgh
-        else if3 (z-1)
+        else do
+            ioEff (IO.println "step")
+            if3 (z-1)
 
 def wormHoleX : Freer [AutomataLabel, NoopEffect, IOEffect] Nat := do
     label "start"
@@ -315,11 +341,8 @@ def toVizAutomata := fun a =>
              "/start"
              "/end"
 
-#check goWormhole2 wormHoleX
+--#check goWormhole2 wormHoleX
 #widget VizGraph.vizGraph toVizAutomata (goWormhole2 wormHoleX)
-
-#eval (reifyRecursion (recurseNode "argh") "argh" "recurse").1.toLabeledGraph.edgesFor 0
-
-
+--#widget VizGraph.vizGraph toVizAutomata (goWormhole2 (if3 3 : Freer [NoopEffect, IOEffect] Nat))
 
 end ProgramAutomata
