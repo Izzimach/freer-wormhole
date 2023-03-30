@@ -127,12 +127,14 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
             --logInfo "no args for lambda"
             wormhole2 transformers applyTransformers #[] body
         else do
+            let argsUsed := e.getAppNumArgs
             let result := e.beta argStack
+            let betaArgs := argStack.toSubarray argsUsed 
             --logInfo "beta reduce result:"
             --logInfo result
             --pure <| mkStrLit "lambda"
             wormhole2 transformers applyTransformers #[] result
-    | proj _ty idx struct => do
+    | .proj _ty idx struct => do
         --logInfo <| "index for project : " ++ (toString idx)
         --logInfo struct
         -- for a projection we need to lookup the struct and then find the relevant field
@@ -170,10 +172,19 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
                 | _ => wormholePure "invalid struct contructor"
             | _ => wormholePure <| "invalid lookup of struct " ++ toString c
         | _ => wormholePure "struct has no name"
-    | fvar _ => do
+    | .letE varName ty value body _ => do
+        logInfo <| "letE: " ++ varName
+        logInfo body
+        logInfo argStack
+        let b := body.instantiate1 value
+        -- we have to replace occurances of varName with value inside of body.
+        -- so we'll add an entry to the transformer list that does that
+        wormhole2 transformers applyTransformers #[] b
+    | .bvar i => wormhole2 transformers applyTransformers #[] (argStack.get! i)
+    | .fvar _ => do
         --logInfo <| "don't know what to do with fvar:" ++ toString e
         wormholePure "fvar"
-    | mvar vid => do
+    | .mvar vid => do
         --logInfo <| "don't know what to do with mvar:" ++ toString e
         let mc ← getMCtx
         let inf ← vid.getDecl
@@ -189,14 +200,14 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
                 pure ()
             | .none=> pure ()
         wormholePure "mvar"
-    | sort _ => do
+    | .sort _ => do
         --logInfo <| "don't know what to do with sort:" ++ toString e
         wormholePure "sort"
-    | mdata _ _ => do
+    | .mdata _ _ => do
         ---logInfo <| "don't know what to do with mdata:" ++ toString e
         wormholePure "mdata"
     | _ => do
-        logInfo <| "zort! I don't know what to do with expression term:" ++ ctorName e ++ toString e
+        logInfo <| "zort! I don't know what to do with expression term: " ++ ctorName e ++ " " ++ toString e
         wormholePure <| "zort" ++ ctorName e ++ "/" ++ toString e
 
 syntax (name := wormholed) "goWormhole2" term : term
@@ -209,11 +220,8 @@ elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command =
         `(@[term_elab Wormhole.wormholed]
           def $wormholeName : TermElab := fun stx _ => do
               let e ← elabTerm (Syntax.getArg stx 1) Option.none
-              logInfo e
               let newS ← wormhole2 $transforms true #[] e
-              --let typeTarget ← elabTerm (← `(FreerSkeleton [NoEffect,IOEffect] (ULift Nat))) .none
               elabTerm newS .none -- (.some typeTarget)
-              --wormhole2 $transforms false #[] e
          )
     elabCommand skelCommand
 
