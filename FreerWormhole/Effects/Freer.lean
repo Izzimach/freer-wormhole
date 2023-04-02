@@ -67,7 +67,7 @@ def send {e : Effect} {effs : List Effect} [HasEffect e effs] (sendop : e.op) : 
     @Freer.Impure effs (e.ret sendop) _ (HasEffect.inject sendop) .Pure
 
 -- Sometimes you have a monad with some effects but you need to pass it into a function
--- with additional effects (see the Catch/Throw higher-order effect for instance).
+-- with additional effects you don't care about (see the Catch/Throw higher-order effect for instance).
 def weaken {g : Effect} {effs : List Effect} : Freer effs a → Freer (g :: effs) a
     | .Pure a => .Pure a
     | .Impure ou next => .Impure (OU.Node ou) (fun x => weaken (next x))
@@ -107,10 +107,10 @@ def foldOver2 {a : Type} {b : Type 2} {effs : List Effect} (pf : a → b) (alg :
     
 
 /-
--- alternate implementation of bind using a fold, similar to the "Hefty Algebras" paper
---
+-- Bind for freer just wraps in a continuation.
 -/
 def bindFreer {a b : Type} (m : Freer effs a) (f : a → Freer effs b) : Freer effs b :=
+    -- alternate implementation of bind using a fold, similar to the "Hefty Algebras" paper
     --@foldOver a (Freer effs b) effs f .Impure m
     match m with
     | .Pure a => f a

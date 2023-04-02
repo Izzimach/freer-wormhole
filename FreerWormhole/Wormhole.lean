@@ -97,11 +97,11 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
             match tr with
             | .some tf => match applyTransformers with
                 | false => do
-                    --logInfo <| "stopping unfold at " ++ n.toString
+                    logInfo <| "stopping unfold at " ++ n.toString
                     pure e
                 | true => do
                     let tresult ← tf argStack (wormhole2 transformers)
-                    --logInfo <| "transform result for " ++ n.toString ++ " :"
+                    logInfo <| "transform result for " ++ n.toString ++ " :"
                     --logInfo tresult
                     pure tresult
             | .none => do
@@ -177,8 +177,6 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
         logInfo body
         logInfo argStack
         let b := body.instantiate1 value
-        -- we have to replace occurances of varName with value inside of body.
-        -- so we'll add an entry to the transformer list that does that
         wormhole2 transformers applyTransformers #[] b
     | .bvar i => wormhole2 transformers applyTransformers #[] (argStack.get! i)
     | .fvar _ => do
@@ -211,8 +209,6 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
         wormholePure <| "zort" ++ ctorName e ++ "/" ++ toString e
 
 syntax (name := wormholed) "goWormhole2" term : term
-
-
 
 set_option hygiene false in
 elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command => do

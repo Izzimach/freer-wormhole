@@ -271,7 +271,7 @@ def heffX : List (String × ProcessHEff) → ProcessHEff :=
 
 def processE : List (String × TermElabM Syntax) :=
     [
-        ⟨"StateEff", `(fun (op : Type 1) x => match x with | StateOp.Put _ => "PutState" | StateOp.Get => "GetState")⟩,
+        ⟨"StateEff", `(fun (op : Type 1) x => match x with | StateOp.Put _ => "PutState" | StateOp.Get => "GetState" | StateOp.Modify _ => "ModifyState")⟩,
         ⟨"ThrowEff", `(fun (op : Type 1) x => "Throw")⟩
     ]
 

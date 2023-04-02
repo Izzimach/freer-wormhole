@@ -329,7 +329,8 @@ def StateProcessor : TermElabM Syntax :=
     `(fun (op : Type 1) (c : StateOp _) =>
           match c with
           | StateOp.Put s => stateModStep "[[put]]" (fun _ => s)
-          | StateOp.Get => basicStep "[[get]]")
+          | StateOp.Get => basicStep "[[get]]"
+          | StateOp.Modify f => stateModStep "[[modify]]" f)
 
 def exampleProcessors : ProcessEffects :=
     [
@@ -372,7 +373,7 @@ def processPure : Expr → TermElabM Syntax :=
 
 
 -- final monad implementing the state and IO
-genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
+--genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
 
 
 
@@ -399,7 +400,7 @@ def toVizAutomata (a : FSM Nat (List String) String) : Json :=
 def toVizProgram (p : MetaProgramGraph Nat String Bool) : Json :=
     toJson <| VizGraph.toVizProgramGraph p.toProgramGraph id
 
-
+/-
 def dumpArgh [HasEffect IOEffect m] : Freer m Nat := do
     ioEff (IO.println "argh")
     pure 4
@@ -432,7 +433,6 @@ def xf := toVizAutomata <| toFSM (ProgramGraphBuilderT.build (goWormhole2 wormHo
 #widget VizGraph.vizGraph xf
 
 
-/-
 def twoSteps {m : Type → Type} [Monad m] : ProgramGraphBuilderT m (MetaProgramGraph Nat String Bool) := do
     let p₁ ← basicStep "a"
     let p₂ ← basicStep "b"
