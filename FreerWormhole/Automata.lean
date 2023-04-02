@@ -309,8 +309,129 @@ def processPure : Expr → TermElabM Syntax :=
     fun e => `(zeroNode)
 
 
+
+
+
+
+
+
+def heffFuncs
+    (cmdTransform : Expr → Expr → TermElabM Syntax) 
+    (heffTransform : Expr → Expr → Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax)
+    (pureTransform : Expr → TermElabM Syntax) : 
+        RBMap String TransformerAppSyntax compare :=
+    let baseFuncs := monadFuncs cmdTransform pureTransform
+    List.foldl (fun a (Prod.mk s f) => a.insert s f) baseFuncs
+        [
+        ⟨"hLift", fun args mk => do
+            let eff := args.get! 0
+            let op := args.get! 3
+            cmdTransform eff op
+        ⟩,
+        ⟨"hSend", fun args mk => do
+            logInfo args
+            let heff := args.get! 1
+            let cmd := args.get! 3
+            let fork := args.get! 4
+            heffTransform heff cmd fork mk
+        ⟩,
+        ⟨"hBind", fun args mk => do
+            let a₁ := args.get! 3
+            let a₂ := args.get! 4
+            let r₁ ← mk true #[] a₁
+            let r₂ ← mk true #[mkStrLit "bad argument"] a₂
+            `(sequenceAutomata $(TSyntax.mk r₁) $(TSyntax.mk r₂))
+        ⟩
+        ]
+
+-- higher-order effect processors need the fork Expr so they can pull out appropriate branches/forks
+def ProcessHEff := Expr → Expr → Expr → (rec : (a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) →TermElabM Syntax  
+
+def heffX : List (String × ProcessHEff) → ProcessHEff :=
+    fun transformers heff cmd fork rec =>
+        match heff.getAppFn with
+        | .const c levels => do
+            logInfo "heffect..."
+            logInfo fork
+            match c.components.getLast? with
+            | .some i => do
+                let z := Syntax.mkStrLit i.toString
+                match transformers.lookup i.toString with
+                | .some tr => tr heff cmd fork rec
+                | .none => `("unhandled effect: " ++ $z)
+            | .none =>
+                let z := Syntax.mkStrLit c.toString
+                `("unnamed heff" ++ $z)
+        | _ => `("heffX error")
+
+def processE : List (String × TermElabM Syntax) :=
+    [
+        ⟨"StateEff", `(fun (op : Type 1) x => match x with | StateOp.Put _ => "PutState" | StateOp.Get => "GetState" | StateOp.Modify _ => "ModifyState")⟩,
+        ⟨"ThrowEff", `(fun (op : Type 1) x => "Throw")⟩
+    ]
+
+
+def stripLambda : Expr → Expr
+    | .lam n arg b bi => b 
+    | e@_ => e
+
+partial
+def unfoldListExpr (e : Expr) : MetaM (List Expr) := do
+    --logInfo e
+    --goExpr e 0
+    let constr := e.getAppFn
+    match constr.constName? with
+    | .some n => do
+        --logInfo <| "constructor: " ++ n.toString
+        if n.toString == "List.cons"
+        then do
+            logInfo "CONS!"
+            let args := e.getAppArgs
+            let head := args[1]!
+            let tail ← unfoldListExpr args[2]!
+            pure <| head :: tail
+        else if n.toString == "List.nil"
+        then do
+            --logInfo "NULL!"
+            pure []
+        else do
+            --logInfo "???"
+            pure []
+    | .none => pure []
+
+
+-- Try to "unfold" the fork element of a Hefy data element.
+-- We for two forms : (fun x => match with |a => ... | b => ...) and (fun ix => [a,b,c][ix])
+-- If it's neither of these the function returns .none
+def unfoldFork (e : Expr) : MetaM (Option (Array Expr)) :=
+    let x := stripLambda e
+    if x.isApp
+    then do
+        let f := x.getAppFn
+        match f.constName? with
+        | .some n => do
+            logInfo <| "fork app is : " ++ n
+            let c := n.components.getLastD ""
+            if "match".isPrefixOf c.toString
+            then do
+                let args := x.getAppArgs
+                let branches := args.toList.drop 5
+                let branches := branches.map stripLambda
+                pure <| .some branches.toArray
+            else if c == "getElem"
+            then do
+                let args := x.getAppArgs
+                let branches ← unfoldListExpr <| args.toList.getD 5 (mkStrLit "error")
+                pure <| .some (List.toArray branches)
+            else pure <| .none    
+        | .none => pure <| .none
+    else pure .none
+
+def processHE : List (String × ProcessHEff) := []
+
 -- final monad implementing the state and IO
-genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
+--genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
+genWormhole2 genFSM >: heffFuncs (processOps exampleProcessors) (heffX processHE) processPure :<
 
 def dumpArgh [HasEffect IOEffect m] : Freer m Nat := do
     ioEff (IO.println "argh")
@@ -344,5 +465,6 @@ def toVizAutomata := fun a =>
 --#check goWormhole2 wormHoleX
 #widget VizGraph.vizGraph toVizAutomata (goWormhole2 wormHoleX)
 --#widget VizGraph.vizGraph toVizAutomata (goWormhole2 (if3 3 : Freer [NoopEffect, IOEffect] Nat))
+
 
 end ProgramAutomata
