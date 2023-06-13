@@ -9,18 +9,20 @@ import SolifugidZ.LabeledGraph
 import SolifugidZ.FSM
 import SolifugidZ.VizGraph
 
-import FreerWormhole.Effects.Freer
-import FreerWormhole.Effects.StdEffs
+import FreerWormhole.Effects.EffM
+import FreerWormhole.Effects.HEffM
+
 import FreerWormhole.Wormhole
 
 
 open Lean Elab Expr Command Meta Term
 
-open Freer Effect StdEffs Wormhole
+open EffM Effect HEffM HEffect
+open Wormhole
 
 open LabeledGraph FSM VizGraph
 
-namespace ProgramAutomata
+namespace WormholeAutomata
 
 /-
 Our automata contains a state machine/FSM for the general connectivity, and
@@ -201,48 +203,23 @@ def reifyException (e : AltAutomata) (x : AltAutomata) (throwId : String) (excep
         exoTransitions := mapRBMap exo (fun l => l.filterMap remapping)
     }
 
+/-
+  Take a given automata and loop it by connecting end nodes to the start nodes
+-/
+def loopAutomata (a : AltAutomata) : AltAutomata :=
+    let eGraph := a.fsm.toExplicit
+    let newEdges : List (Nat × Nat) := List.join <| a.fsm.startStates.map (fun n₂ => a.fsm.endStates.map (fun n₁ => ⟨n₁,n₂⟩))
+    let eGraph := newEdges.foldl (fun g ⟨n₁,n₂⟩ => LabeledGraph.addEdge g n₁ n₂ "") eGraph
+    {a with fsm.toLabeledGraph := LabeledGraph.fromExplicit eGraph}
 
 
-inductive VertexLabelCommand : Type u where
-    | Label : String → VertexLabelCommand
-
--- an effect that labels a node of the generated automata
-def AutomataLabel : Effect :=
-    {
-        op := VertexLabelCommand,
-        ret := fun _ => Unit
-    }
-
-def label [HasEffect AutomataLabel effs] (l : String) : Freer effs PUnit :=
-    @send AutomataLabel effs _ (VertexLabelCommand.Label l)
-
-
-def monadFuncs
-    (cmdTransform : Expr → Expr → TermElabM Syntax) 
-    (pureTransform : Expr → TermElabM Syntax) : 
-        RBMap String TransformerAppSyntax compare :=
-    RBMap.ofList
-    [
-        ⟨"send", fun args mk => do
-            let eff := args.get! 0
-            let op := args.get! 3
-            cmdTransform eff op
-        ⟩,
-        ⟨"bind", fun args mk => do
-            let a₁ := args.get! 4
-            let a₂ := args.get! 5
-            let r₁ ← mk true #[] a₁
-            let r₂ ← mk true #[mkStrLit "bad argument"] a₂
-            `(sequenceAutomata $(TSyntax.mk r₁) $(TSyntax.mk r₂))
-        ⟩,
-        ⟨"Pure", fun args mk => do
-            let a := args.get! 2
-            pureTransform a
-        ⟩,
-        ⟨"pure", fun args mk => do
-            let a := args.get! 3
-            pureTransform a
-        ⟩,
+def automataTransformers
+    (effTransform : ProcessEffect) 
+    (heffTransform : ProcessHEffect)
+    (directTransforms : List (String × TransformerAppSyntax))
+    (pureTransform : Expr → TermElabM Syntax)
+    : List (String × TransformerAppSyntax) :=
+    directTransforms ++ [
         -- if
         ⟨"ite", fun args mk => do
             logInfo <| args.get! 0
@@ -271,188 +248,49 @@ def monadFuncs
             let recursiveCall := mkAppN (mkConst ``recurseNode) #[recVar]
             let recurseBody ← mk true #[mkStrLit "arg", recursiveCall] recFun
             `(reifyRecursion $(TSyntax.mk recurseBody) $(Syntax.mkStrLit recId) "recurse")
-        ⟩
-    ]
-
-def ProcessEffects := List (String × TermElabM Syntax)
-
-def exampleProcessors : ProcessEffects :=
-    [
-        ⟨"NoopEffect", `(fun (op : Type 1) (x : op) => zeroNode)⟩,
-        ⟨"IOEffect", `(fun (op : Type 1) (o : StdEffs.IOX) => labeledNode "IO!")⟩,
-        ⟨"AutomataLabel", `(fun (op : Type 1) (x : VertexLabelCommand) => labeledNode x.1)⟩
-    ]
-
--- given some processors to process different effects (ProcessEffects) this will
--- look at the effect and operator passed in and try to apply the appropriate
--- processor.
-def processOps : ProcessEffects → Expr → Expr → TermElabM Syntax := fun pr eff op => do
-    match eff.getAppFn with
-    | .const effName lvls => do
-        let eNameEnd := effName.components.getLastD "_"
-        match List.lookup eNameEnd.toString pr with
-        | .some fm => do
-            withFreshMacroScope <| do
-                let et ← inferType op
-                let etStx ← `(?et)
-                let opStx ← `(?op)
-                let etVar ← elabTerm etStx .none
-                let opVar ← elabTerm opStx (.some et)
-                etVar.mvarId!.assign et
-                opVar.mvarId!.assign op
-                let f ← fm
-                `($(TSyntax.mk f) ?et ?op)
-        | .none => `("no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
-    | _ => `("malformed effect")
-
-def processPure : Expr → TermElabM Syntax :=
-    fun e => `(zeroNode)
-
-
-
-
-
-
-
-
-def heffFuncs
-    (cmdTransform : Expr → Expr → TermElabM Syntax) 
-    (heffTransform : Expr → Expr → Expr → ((a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax)
-    (pureTransform : Expr → TermElabM Syntax) : 
-        RBMap String TransformerAppSyntax compare :=
-    let baseFuncs := monadFuncs cmdTransform pureTransform
-    List.foldl (fun a (Prod.mk s f) => a.insert s f) baseFuncs
-        [
-        ⟨"hLift", fun args mk => do
+        ⟩,
+        ⟨"send", fun args mk => do
             let eff := args.get! 0
             let op := args.get! 3
-            cmdTransform eff op
+            effTransform eff op
         ⟩,
-        ⟨"hSend", fun args mk => do
-            logInfo args
-            let heff := args.get! 1
-            let cmd := args.get! 3
+        ⟨"hLift", fun args mk => do
+            let heff := args.get! 0
+            let op := args.get! 3
             let fork := args.get! 4
-            heffTransform heff cmd fork mk
+            heffTransform heff op fork mk
         ⟩,
-        ⟨"hBind", fun args mk => do
-            let a₁ := args.get! 3
-            let a₂ := args.get! 4
+        ⟨"bind", fun args mk => do
+            let a₁ := args.get! 4
+            let a₂ := args.get! 5
             let r₁ ← mk true #[] a₁
             let r₂ ← mk true #[mkStrLit "bad argument"] a₂
             `(sequenceAutomata $(TSyntax.mk r₁) $(TSyntax.mk r₂))
+        ⟩,
+        ⟨"Pure", fun args mk => do
+            let a := args.get! 2
+            pureTransform a
+        ⟩,
+        ⟨"pure", fun args mk => do
+            let a := args.get! 3
+            pureTransform a
         ⟩
-        ]
-
--- higher-order effect processors need the fork Expr so they can pull out appropriate branches/forks
-def ProcessHEff := Expr → Expr → Expr → (rec : (a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) →TermElabM Syntax  
-
-def heffX : List (String × ProcessHEff) → ProcessHEff :=
-    fun transformers heff cmd fork rec =>
-        match heff.getAppFn with
-        | .const c levels => do
-            logInfo "heffect..."
-            logInfo fork
-            match c.components.getLast? with
-            | .some i => do
-                let z := Syntax.mkStrLit i.toString
-                match transformers.lookup i.toString with
-                | .some tr => tr heff cmd fork rec
-                | .none => `("unhandled effect: " ++ $z)
-            | .none =>
-                let z := Syntax.mkStrLit c.toString
-                `("unnamed heff" ++ $z)
-        | _ => `("heffX error")
-
-def processE : List (String × TermElabM Syntax) :=
-    [
-        ⟨"StateEff", `(fun (op : Type 1) x => match x with | StateOp.Put _ => "PutState" | StateOp.Get => "GetState" | StateOp.Modify _ => "ModifyState")⟩,
-        ⟨"ThrowEff", `(fun (op : Type 1) x => "Throw")⟩
     ]
 
+def automataPure : Expr → TermElabM Syntax :=
+    fun e => `(zeroNode)--`(labeledNode "pure")
 
-def stripLambda : Expr → Expr
-    | .lam n arg b bi => b 
-    | e@_ => e
-
-partial
-def unfoldListExpr (e : Expr) : MetaM (List Expr) := do
-    --logInfo e
-    --goExpr e 0
-    let constr := e.getAppFn
-    match constr.constName? with
-    | .some n => do
-        --logInfo <| "constructor: " ++ n.toString
-        if n.toString == "List.cons"
-        then do
-            logInfo "CONS!"
-            let args := e.getAppArgs
-            let head := args[1]!
-            let tail ← unfoldListExpr args[2]!
-            pure <| head :: tail
-        else if n.toString == "List.nil"
-        then do
-            --logInfo "NULL!"
-            pure []
-        else do
-            --logInfo "???"
-            pure []
-    | .none => pure []
-
-
--- Try to "unfold" the fork element of a Hefy data element.
--- We for two forms : (fun x => match with |a => ... | b => ...) and (fun ix => [a,b,c][ix])
--- If it's neither of these the function returns .none
-def unfoldFork (e : Expr) : MetaM (Option (Array Expr)) :=
-    let x := stripLambda e
-    if x.isApp
-    then do
-        let f := x.getAppFn
-        match f.constName? with
-        | .some n => do
-            logInfo <| "fork app is : " ++ n
-            let c := n.components.getLastD ""
-            if "match".isPrefixOf c.toString
-            then do
-                let args := x.getAppArgs
-                let branches := args.toList.drop 5
-                let branches := branches.map stripLambda
-                pure <| .some branches.toArray
-            else if c == "getElem"
-            then do
-                let args := x.getAppArgs
-                let branches ← unfoldListExpr <| args.toList.getD 5 (mkStrLit "error")
-                pure <| .some (List.toArray branches)
-            else pure <| .none    
-        | .none => pure <| .none
-    else pure .none
-
-def processHE : List (String × ProcessHEff) := []
-
--- final monad implementing the state and IO
---genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
-genWormhole2 genFSM >: heffFuncs (processOps exampleProcessors) (heffX processHE) processPure :<
-
-def dumpArgh [HasEffect IOEffect m] : Freer m Nat := do
-    ioEff (IO.println "argh")
-    pure 4
-
-def if3 [HasEffect NoopEffect m] [HasEffect IOEffect m] : Nat →  Freer m Nat :=
-    fun z => do
-        noop
-        if z = 0
-        then dumpArgh
-        else do
-            ioEff (IO.println "step")
-            if3 (z-1)
-
-def wormHoleX : Freer [AutomataLabel, NoopEffect, IOEffect] Nat := do
-    label "start"
-    let y ← if3 3
-    label "mid"
-    noop
-    label "end"
-    pure y
+def buildAutomataWormhole (processors : List WormholeCallbacks) (processPure : Expr → TermElabM Syntax)
+    : RBMap String TransformerAppSyntax compare :=
+    let forEffects := List.join <| processors.map (fun w => w.effects)
+    let forHEffects := List.join <| processors.map (fun w => w.heffects)
+    let forDirect := List.join <| processors.map (fun w => w.direct)
+    RBMap.fromList
+        (automataTransformers
+            (dispatchEffectProcessor forEffects)
+            (dispatchHEffectProcessor forHEffects)
+            forDirect processPure)
+        compare
 
 def toVizAutomata := fun a =>
     toJson <|
@@ -461,10 +299,16 @@ def toVizAutomata := fun a =>
              id
              "/start"
              "/end"
+             []
 
---#check goWormhole2 wormHoleX
-#widget VizGraph.vizGraph toVizAutomata (goWormhole2 wormHoleX)
---#widget VizGraph.vizGraph toVizAutomata (goWormhole2 (if3 3 : Freer [NoopEffect, IOEffect] Nat))
+-- Since foreverUntil is partial it won't show up in the normal wormhole transformation. But we
+-- know what the final graph should look like, so we still generate a program graph.
+def ForeverUntilAutomataProcessor : WormholeCallbacks :=
+    WormholeCallbacks.mk
+        []
+        []
+        [⟨"foreverUntil", fun args mk => do
+            let inLoop ← mk true #[] (args.get! 2)
+            `(loopAutomata $(TSyntax.mk inLoop))⟩]
 
-
-end ProgramAutomata
+end WormholeAutomata

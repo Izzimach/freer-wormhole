@@ -108,17 +108,28 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
                 let env ← getEnv
                 let v := env.find? c
                 match v with
-                | Option.none => wormholePure "Cannot find constant named "
+                | Option.none => wormholePure <| "Cannot find constant named: " ++ c.toString
                 | Option.some cr => do
                     match cr.value? with
                     | Option.none => do
+                        logInfo <| match cr with
+                                    | .axiomInfo _ => "const axiom"
+                                    | .defnInfo _ => "const defn"
+                                    | .thmInfo _ => "const thm info"
+                                    | .opaqueInfo v => "const opaque info: " ++ String.join (v.all.map toString)
+                                    | .quotInfo _ => "const quot"
+                                    | .inductInfo _ => "const inductInfo"
+                                    | .ctorInfo _ => "const ctorinfo"
+                                    | .recInfo _ => "const recInfo"
                         -- constructors are assembled and returned if we're not transforming, so that
                         -- projections can properly deconstruct them
                         if cr.isCtor
                         then match applyTransformers with
                              | true => wormholePure <| "Found constructor const - " ++ c.toString
                              | false =>  pure <| mkAppN e argStack
-                        else wormholePure <| "No value for const - " ++ c.toString
+                        else do
+                            logInfo <| String.join <| (env.extraConstNames.toList.map (fun ees => ees.toString))
+                            wormholePure <| "No value for const - " ++ c.toString
                     | Option.some s => wormhole2 transformers applyTransformers argStack s
     | .lam bn _bt body _bi => do
         --logInfo <| "lambda, arg name=" ++ bn.toString ++ ", args=" ++ argStack.toList.toString
@@ -202,7 +213,7 @@ partial def wormhole2 (transformers : RBMap String TransformerAppSyntax compare)
         --logInfo <| "don't know what to do with sort:" ++ toString e
         wormholePure "sort"
     | .mdata _ _ => do
-        ---logInfo <| "don't know what to do with mdata:" ++ toString e
+        logInfo <| "don't know what to do with mdata:" ++ toString e
         wormholePure "mdata"
     | _ => do
         logInfo <| "zort! I don't know what to do with expression term: " ++ ctorName e ++ " " ++ toString e
@@ -227,5 +238,136 @@ elab "genWormhole2" wormholeName:ident " >: " transforms:term " :< " : command =
 --#eval goWormhole2 ((3 : Nat) + 3)
 --def y :=  (fun x => match x with |Nat.zero => 0 | Nat.succ _ => 1)
 --#eval goWormhole2 ((fun x => match x with |Nat.zero => 0 | _ => 1) : Nat → Nat) 
+
+-- type of a function to transform a specific effect data instance: first argument is the type of the
+-- effect op, and second argument is the actual op value
+def ProcessEffect := Expr → Expr → TermElabM Syntax
+
+-- higher-order effect processors work like `ProcessEffect` but have a third
+-- argument that is the fork Expr. Also includes the recursive wormhole function so that branches/forks can be transformed
+def ProcessHEffect := Expr → Expr → Expr → (rec : (a : Bool) → Array Expr → Expr → TermElabM (wormholeResult a)) → TermElabM Syntax  
+
+--
+-- this holds the relevant set of transformers for a specific effect or module. Typically you'll just have a single
+-- entry in `effect` or `heffect` but some effect will have more complicated rules and requirements and might have more than
+-- one entry in a field or more than one field filled in.
+--
+structure WormholeCallbacks : Type where
+    effects : List (String × ProcessEffect)
+    heffects : List (String × ProcessHEffect)
+    direct : List (String × TransformerAppSyntax)
+
+
+def effSyntaxMode (pr : TermElabM Syntax) : ProcessEffect := fun eff op => do
+    withFreshMacroScope <| do
+        let et ← inferType op
+        let etStx ← `(?et)
+        let opStx ← `(?op)
+        let etVar ← elabTerm etStx .none
+        let opVar ← elabTerm opStx (.some et)
+        etVar.mvarId!.assign et
+        opVar.mvarId!.assign op
+        let f ← pr
+        `($(TSyntax.mk f) ?et ?op)
+
+-- given some effect name, figures out which processor to use for that effect
+def dispatchEffectProcessor : List (String × ProcessEffect) → ProcessEffect := fun pr eff op => do
+    match eff.getAppFn with
+    | .const effName lvls => do
+        let eNameEnd := effName.components.getLastD "_"
+        match List.lookup eNameEnd.toString pr with
+        | .some fm => fm eff op
+        | .none => `("no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
+    | _ => `("malformed effect")
+
+def dispatchHEffectProcessor : List (String × ProcessHEffect) → ProcessHEffect := fun transformers heff cmd fork rec =>
+    match heff.getAppFn with
+    | .const c levels => do
+        logInfo "heffect..."
+        --logInfo fork
+        match c.components.getLast? with
+        | .some i => do
+            let z := Syntax.mkStrLit i.toString
+            match transformers.lookup i.toString with
+            | .some tr => tr heff cmd fork rec
+            | .none => `("unhandled effect: " ++ $z)
+        | .none =>
+            let z := Syntax.mkStrLit c.toString
+            `("unnamed heff" ++ $z)
+    | _ => `("heffX error")
+
+def stripLambda : Expr → Expr
+    | .lam n arg b bi => b 
+    | e@_ => e
+
+partial
+def unfoldListExpr (e : Expr) : MetaM (List Expr) := do
+    --logInfo e
+    --goExpr e 0
+    let constr := e.getAppFn
+    match constr.constName? with
+    | .some n => do
+        --logInfo <| "constructor: " ++ n.toString
+        if n.toString == "List.cons"
+        then do
+            logInfo "CONS!"
+            let args := e.getAppArgs
+            let head := args[1]!
+            let tail ← unfoldListExpr args[2]!
+            pure <| head :: tail
+        else if n.toString == "List.nil"
+        then do
+            --logInfo "NULL!"
+            pure []
+        else do
+            --logInfo "???"
+            pure []
+    | .none => pure []
+
+
+-- Try to "unfold" the fork element of a Hefy data element.
+-- We for two forms : (fun x => match with |a => ... | b => ...) and (fun ix => [a,b,c][ix])
+-- If it's neither of these the function returns .none
+def unfoldFork (e : Expr) : MetaM (Option (Array Expr)) :=
+    let x := stripLambda e
+    if x.isApp
+    then do
+        let f := x.getAppFn
+        match f.constName? with
+        | .some n => do
+            logInfo <| "fork app is : " ++ n
+            let c := n.components.getLastD ""
+            if "match".isPrefixOf c.toString
+            then do
+                let args := x.getAppArgs
+                --logInfo <| "fork has " ++ (toString args.size) ++ " args"
+                --logInfo args
+                let branches := args.toList.drop 3
+                let branches := branches.map stripLambda
+                pure <| .some branches.toArray
+            else if c == "getElem"
+            then do
+                let args := x.getAppArgs
+                let branches ← unfoldListExpr <| args.toList.getD 3 (mkStrLit "error")
+                pure <| .some (List.toArray branches)
+            else if c == "get"
+            then do
+                let args := x.getAppArgs
+                logInfo <| args
+                let branches ← unfoldListExpr <| args.toList.getD 1 (mkStrLit "error")
+                pure <| .some (List.toArray branches)
+            else pure <| .none    
+        | .none => pure <| .none
+    else pure .none
+
+
+-- An endless loop - this is partial so the elaborator will hide it behind an `opaque` Expr,
+-- but we can write a transformer specifically for foreverUntil that knows how to build the correct
+-- FSM or other final data structure.
+partial
+def foreverUntil [Monad m] (mainLine : m Bool) : m Unit := do
+    if (← mainLine)
+    then pure ()
+    else foreverUntil mainLine
 
 end Wormhole

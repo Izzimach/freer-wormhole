@@ -8,17 +8,18 @@ import Lean
 
 import SolifugidZ.Basic
 import SolifugidZ.ProgramGraph
+import SolifugidZ.APBits
 import SolifugidZ.FSM
 import SolifugidZ.VizGraph
 
-import FreerWormhole.Effects.Freer
---import FreerWormhole.Effects.HEff
-import FreerWormhole.Effects.StdEffs
+import FreerWormhole.Effects.EffM
+import FreerWormhole.Effects.HEffM
+
 import FreerWormhole.Wormhole
 
 open Lean Elab Command Term Meta PrettyPrinter
 
-open Freer Effect StdEffs Wormhole
+open EffM Effect HEffM HEffect Wormhole
 
 open Basic ProgramGraph
 
@@ -54,7 +55,7 @@ def sequencePrograms {Loc Act StateVariables : Type} [Ord Loc] [Ord Act] [Inhabi
     (p₁ p₂ : MetaProgramGraph Loc Act StateVariables) : MetaProgramGraph Loc Act StateVariables :=
     let pg₁ := p₁.toProgramGraph
     let pg₂ := p₂.toProgramGraph
-    -- we add the same set of transitions to all flowOuts of p₁
+    -- each flowOut of p₁ gets a transition to every flowIn of p₂
     let newTransitions := p₁.flowOut.map (fun ⟨a,l₁⟩ => ⟨l₁,p₂.flowIn.map (fun l₂ => ProgramTransition.mk .none a id l₂)⟩)
     {
       toProgramGraph :=
@@ -87,6 +88,19 @@ instance [Monad m] : Monad (ProgramGraphBuilderT m) where
 instance [Functor m] [Monad m] : Functor (ProgramGraphBuilderT m) where
     map := fun f p => StateT.map f p
 
+def labelStep {S : Type} (l : String) [Ord Action] [Inhabited Action] [Monad m] : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S) := do
+    let l₁ ← nextLoc
+    pure {
+        toProgramGraph := {
+          transitions := .empty,
+          locationLabels := RBMap.fromList [⟨l₁,[l]⟩] compare,
+          starts := [l₁]
+        },
+        flowIn := [l₁],
+        flowOut := [⟨default, l₁⟩],
+        jumpTo := .empty
+    }
+
 
 def basicStep {S : Type} (a : Action) [Ord Action] [Inhabited Action] [Monad m] : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S) := do
     let l₁ ← nextLoc
@@ -115,6 +129,20 @@ def stateModStep {S : Type} (a : Action) (f : S → S) [Ord Action] [Inhabited A
         jumpTo := .empty
     }
 
+def singleStep {S : Type} (a : Action) (guard : S → Bool) (f : S → S) [Ord Action] [Inhabited Action] [Monad m] : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S) := do
+    let l₁ ← nextLoc
+    let l₂ ← nextLoc 
+    pure {
+        toProgramGraph := {
+          transitions := RBMap.fromList [⟨l₁,[ProgramTransition.mk (.some guard) a f l₂]⟩] compare,
+          locationLabels := .empty,
+          starts := [l₁]
+        },
+        flowIn := [l₁],
+        flowOut := [⟨default, l₂⟩],
+        jumpTo := .empty
+    }
+    
 def sequenceProgramGraphs [Ord Act] [Inhabited Act] [Monad m]
     (b₁ b₂ : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables))
     :  ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
@@ -210,11 +238,35 @@ def resolveRecursiveJump {S : Type} [Ord Action] [Inhabited Action] [Monad m]
     }
 
 /-
- While building a ProgramGraph we store flowIn/flowOut edges that don't lead to an actualy node, and will
- get filled in later. This is to reduce the amount of redundant nodes. However when  vizualizing these
- flows don't show up. So this function will add nodes to server as source/sink for those flow edges.
+ Process a `foreverUntil`. We take the mainline linear code of the foreverUntil and turn it into a loop with
+ a nonDet branch at the end. To do this we add loops from all flowOut nodes to all flowIn nodes.
 -/
-def reifyFlows {Act StateVariables : Type} [Ord Act] [Inhabited Act] [Monad m] [Inhabited StateVariables]
+def intoLoop {S : Type} [Ord Action] [Inhabited Action] [Monad m]
+    (p : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S))
+    : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S) := do
+    let p ← p
+    let newTransitions : List (Nat × Nat) := List.join <| p.flowOut.map (fun ⟨_,n₁⟩ => p.flowIn.map (fun n₂ => ⟨n₁,n₂⟩))
+    let pg' := newTransitions.foldl (fun g ⟨l₁,l₂⟩ => g.addTransition l₁ l₂ (fun _ => true) default id) p.toProgramGraph
+    pure { p with toProgramGraph := pg' }
+
+-- Since foreverUntil is partial it won't show up in the normal wormhole transformation. But we
+-- know what the final graph should look like, so we still generate a program graph.
+def ForeverUntilProgramGraphProcessor : WormholeCallbacks :=
+    WormholeCallbacks.mk
+        []
+        []
+        [⟨"foreverUntil", fun args mk => do
+            let inLoop ← mk true #[] (args.get! 2)
+            `(intoLoop $(TSyntax.mk inLoop))⟩]
+
+
+/-
+ While building a ProgramGraph we store flowIn/flowOut edges that don't lead to an actual node, and will
+ get filled in later. This is to reduce the amount of redundant nodes. However when visualizing or checking
+ these flows don't show up. So this function will add nodes to server as source/sink for those flow edges.
+-/
+def reifyFlows {Act StateVariables : Type} [Ord Act] [Inhabited Act] [Monad m]
+    (outLabel : String)
     (pg : MetaProgramGraph Nat Act StateVariables)
     : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
     let inNode ← nextLoc
@@ -231,43 +283,152 @@ def reifyFlows {Act StateVariables : Type} [Ord Act] [Inhabited Act] [Monad m] [
           starts := if pg.flowIn.length == 0
                     then pg.starts
                     else [inNode],
-          locationLabels := pg.locationLabels
+          locationLabels := pg.locationLabels.insert outNode [outLabel]
         },
         flowIn := [],
         flowOut := [],
         jumpTo := pg.jumpTo
     }
 
-
-inductive ProgramLabelCommand : Type u where
-    | Label : String → ProgramLabelCommand
-
--- an effect that labels a node of the generated automata
-def ProgramLabel : Effect :=
-    {
-        op := ProgramLabelCommand,
-        ret := fun _ => Unit
+/-
+  At the end of a program, for proper termination we add a terminal node that self-loops. This are added as a target of all the
+  flowOut nodes.
+-/
+def addTerminalNode {Act StateVariables : Type} [Ord Act] [Inhabited Act] [Monad m]
+    (terminalLabel : String)
+    (pg : MetaProgramGraph Nat Act StateVariables)
+    : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
+    let terminalNode ← nextLoc 
+    let outTransitions := pg.flowOut.map (fun ⟨a,l⟩ => ⟨l,[ProgramTransition.mk .none a id terminalNode]⟩)
+    let terminalSelfLoop := ⟨terminalNode,[ProgramTransition.mk .none default id terminalNode]⟩
+    let allTransitions := mergeRBMaps pg.transitions (RBMap.fromList (terminalSelfLoop :: outTransitions) compare)
+    pure {
+        toProgramGraph := {
+          transitions := allTransitions,
+          starts := if pg.flowIn.length == 0
+                    then pg.starts
+                    else pg.flowIn,
+          locationLabels := pg.locationLabels.insert terminalNode [terminalLabel]
+        },
+        flowIn := [],
+        flowOut := [],
+        jumpTo := pg.jumpTo
     }
 
-def label [HasEffect ProgramLabel effs] (l : String) : Freer effs PUnit :=
-    @send ProgramLabel effs _ (ProgramLabelCommand.Label l)
+/-
+  Route all flow out nodes of a program into a single self-loop node, representing
+  a spot to wait for other threads to progress and (eventually) finish.
+-/
+def addJoinNode {Act StateVariables : Type} [Ord Act] [Inhabited Act] [Monad m]
+    (joinLabel : String)
+    (pg : MetaProgramGraph Nat Act StateVariables)
+    : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
+    let joinNode ← nextLoc 
+    let outTransitions := pg.flowOut.map (fun ⟨a,l⟩ => ⟨l,[ProgramTransition.mk .none a id joinNode]⟩)
+    let joinSelfLoop := ⟨joinNode,[ProgramTransition.mk .none default id joinNode]⟩
+    let allTransitions := mergeRBMaps pg.transitions (RBMap.fromList (joinSelfLoop :: outTransitions) compare)
+    pure {
+        toProgramGraph := {
+          transitions := allTransitions,
+          starts := if pg.flowIn.length == 0
+                    then pg.starts
+                    else pg.flowIn,
+          locationLabels := pg.locationLabels.insert joinNode [joinLabel]
+        },
+        flowIn := [],
+        flowOut := [⟨default,joinNode⟩],
+        jumpTo := pg.jumpTo
+    }
 
+/-
+ Remove flowOut transitions with non-default actions. We need this because
+ when interleaving, combining two flowOuts with non-default actions is problematic.
+-/
+def onlyDefaultFlowOuts {Act StateVariables : Type} [Ord Act] [BEq Act] [Inhabited Act] [Monad m]
+    (pg : MetaProgramGraph Nat Act StateVariables)
+    : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
+    let ⟨defaultFlowOuts, nondefaultFlowOuts⟩ := pg.flowOut.partition (fun ⟨a,n⟩ => a == default)
+    -- for each non-default flowOut, we create a new node as a destination for the flowOut, and
+    -- create a default flowOut from that new node
+    --let pg := { pg with flowOut := defaultFlowOuts }
+    nondefaultFlowOuts.foldlM
+        (fun p ⟨a,n⟩ => do
+            let newLoc ← nextLoc
+            let newGraph := p.toProgramGraph.addTransition n newLoc (fun _ => true) a id
+            let newFlowOut := p.flowOut.cons ⟨default, newLoc⟩
+            pure {p with toProgramGraph := newGraph, flowOut := newFlowOut})
+        pg
 
-def const {a b : Type} (c : b) : a → b := fun _ => c
+/-
+ Interleave - combine two program graphs in parallel.
+-/
+def concurrentPrograms [Ord Act] [Inhabited Act] [BEq Act] [Monad m] [BEq StateVariables]
+    (p₁ p₂ : ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables))
+    :  ProgramGraphBuilderT m (MetaProgramGraph Nat Act StateVariables) := do
+    -- build the programs and combine them. FlowOuts are problematic so we eliminate them by
+    -- applying onlyDefaultFlowOuts
+    let p₁ ← p₁ >>= onlyDefaultFlowOuts
+    let p₂ ← p₂ >>= onlyDefaultFlowOuts
+    let pX := interleaveProgramGraphs p₁.toProgramGraph p₂.toProgramGraph .none
+    -- We assume a fork/join model where all the concurrent programs start at once and the combined program
+    -- does not complete until all programs complete. Thus both flowIn and flowOut are cartesian products of
+    -- the original values.
+    let flowInX := List.join <| p₁.flowIn.map (fun n₁ => p₂.flowIn.map (fun n₂ => OProd.mk n₁ n₂))
+    -- Note that flowOuts only have default actions (because we ran onlyDefaultFlowOuts above) so we ignore
+    -- the actions present in both p₁.flowOut and p₂.flowOut and just build product flowOuts with default actions.
+    let flowOutX : List (Act × OProd Nat Nat) :=
+        List.join <| p₁.flowOut.map (fun ⟨_,n₁⟩ => p₂.flowOut.map (fun ⟨_,n₂⟩ => ⟨default, OProd.mk n₁ n₂⟩))
+    -- the combined program has vertex indices (OProd Nat Nat) so we need to convert them back into
+    -- just Nat
+    let locations := pX.allLocations
+    let remapping : RBMap (OProd Nat Nat) Nat compare ←
+        locations.foldlM
+            (fun m v => do
+                let l ← nextLoc
+                pure <| m.insert v l)
+            RBMap.empty
+    let remapLoc : OProd Nat Nat → Nat := fun nn => remapping.findD nn 1000
+    let remapTransition : ProgramTransition (OProd Nat Nat) Act StateVariables → ProgramTransition Nat Act StateVariables :=
+        fun ⟨g,a,e,n⟩ => ⟨g,a,e,remapLoc n⟩
+    -- now we need to remap everything : transitions, labels, starts, flowIn, flowOut
+    let pN : ProgramGraph Nat Act StateVariables := {
+        transitions := pX.transitions.fold (fun m k v => m.insert (remapLoc k) (v.map remapTransition)) RBMap.empty,
+        locationLabels := pX.locationLabels.fold (fun m k v => m.insert (remapLoc k) v) RBMap.empty,
+        starts := pX.starts.map remapLoc
+        }
+    let flowInX := flowInX.map remapLoc
+    let flowOutX := flowOutX.map <| fun ⟨a,nn⟩ => ⟨a, remapLoc nn⟩
+    -- we throw away jumpTo, I'm not sure how that would work anyways
+    pure <| {
+        toProgramGraph := pN,
+        flowIn := flowInX,
+        flowOut := flowOutX,
+        jumpTo := RBMap.empty
+    }
 
-def cTrue {a : Type} : a → Bool := const true
-def cFalse {a : Type} : a → Bool  := const false
-
-def monadFuncs
-    (cmdTransform : Expr → Expr → TermElabM Syntax) 
-    (pureTransform : Expr → TermElabM Syntax) : 
-        RBMap String TransformerAppSyntax compare :=
-    RBMap.ofList
-    [
+def programGraphTransformers
+    (effTransform : ProcessEffect) 
+    (heffTransform : ProcessHEffect)
+    (directTransforms : List (String × TransformerAppSyntax))
+    (pureTransform : Expr → TermElabM Syntax)
+    : List (String × TransformerAppSyntax) :=
+    directTransforms ++ [
         ⟨"send", fun args mk => do
             let eff := args.get! 0
             let op := args.get! 3
-            cmdTransform eff op
+            effTransform eff op
+        ⟩,
+        ⟨"hLift", fun args mk => do
+            let heff := args.get! 0
+            let op := args.get! 3
+            let fork := args.get! 4
+            heffTransform heff op fork mk
+        ⟩,
+        ⟨"hSend", fun args mk => do
+            let heff := args.get! 0
+            let op := args.get! 3
+            let fork := args.get! 4
+            heffTransform heff op fork mk
         ⟩,
         ⟨"bind", fun args mk => do
             let a₁ := args.get! 4
@@ -315,136 +476,94 @@ def monadFuncs
         ⟩
     ]
 
-
---
--- when processing an effect, we can work directly with the Expr but it's usually better to
--- just return Syntax
---
-
-def ProcessEffects := List (String × TermElabM Syntax)
-
-/- If the state monad represents the actual state used in the program graph, we can
-   use this Processor. -/
-def StateProcessor : TermElabM Syntax :=
-    `(fun (op : Type 1) (c : StateOp _) =>
-          match c with
-          | StateOp.Put s => stateModStep "[[put]]" (fun _ => s)
-          | StateOp.Get => basicStep "[[get]]"
-          | StateOp.Modify f => stateModStep "[[modify]]" f)
-
-def exampleProcessors : ProcessEffects :=
-    [
-        ⟨"NoopEffect", `(fun (op : Type 1) (x : op) => basicStep "Noop")⟩,
-        ⟨"IOEffect", `(fun (op : Type 1) (o : StdEffs.IOX) => basicStep "IO")⟩,
-        ⟨"ProgramLabel", `(fun (op : Type 1) (x : ProgramLabelCommand) => basicStep ("[[" ++ x.1 ++ "]]"))⟩,
-        ⟨"StateEff", StateProcessor⟩
-    ]
-
--- given some processors to process different effects (ProcessEffects) this will
--- look at the effect and operator passed in and try to apply the appropriate
--- processor.
-def processOps : ProcessEffects → Expr → Expr → TermElabM Syntax := fun pr eff op => do
-    match eff.getAppFn with
-    | .const effName lvls => do
-        let eNameEnd := effName.components.getLastD "_"
-        match List.lookup eNameEnd.toString pr with
-        | .some fm => do
-            withFreshMacroScope <| do
-                let et ← inferType op
-                let etStx ← `(?et)
-                let opStx ← `(?op)
-                let etVar ← elabTerm etStx .none
-                let opVar ← elabTerm opStx (.some et)
-                etVar.mvarId!.assign et
-                opVar.mvarId!.assign op
-                let f ← fm
-                let declName := (←read).declName?
-                match declName with
-                | .some d => logInfo ("decl: " ++ d)
-                | .none => logInfo "NO DECL"
-                `($(TSyntax.mk f) ?et ?op)
-        | .none => `("no handler for effect " ++ $(Syntax.mkStrLit effName.toString))
-    | _ => `("malformed effect")
-
-def processPure : Expr → TermElabM Syntax :=
-    fun e => `(basicStep ("pure"))
+def programGraphPure : Expr → TermElabM Syntax :=
+    fun e => `(basicStep default)
 
 
+def buildProgramGraphWormhole (processors : List WormholeCallbacks) (processPure : Expr → TermElabM Syntax)
+    : RBMap String TransformerAppSyntax compare :=
+    let forEffects := List.join <| processors.map (fun w => w.effects)
+    let forHEffects := List.join <| processors.map (fun w => w.heffects)
+    let forDirect := List.join <| processors.map (fun w => w.direct)
+    RBMap.fromList
+        (programGraphTransformers
+            (dispatchEffectProcessor forEffects)
+            (dispatchHEffectProcessor forHEffects)
+            forDirect processPure)
+        compare
 
 
 -- final monad implementing the state and IO
 --genWormhole2 genFSM >: monadFuncs (processOps exampleProcessors) processPure :<
 
 
+-- for unfolded program graphs we use vertex labels that have both a text string for human
+-- readability, and a set of APBits for LTL/CTL checking
+structure UnfoldedVertexLabel (APList : List String) : Type where
+    (textLabel : String)
+    (atomicProps : APBits APList)
 
-def toFSM (p : MetaProgramGraph Nat String StateVariables) (initialStates : List StateVariables)
-    [ToString StateVariables] [BEq StateVariables] [Ord StateVariables] [StateCardinality StateVariables]
-    : FSM Nat (List String) String :=
+instance : Inhabited (UnfoldedVertexLabel APList) where
+    default := UnfoldedVertexLabel.mk "" APBits.empty
+
+
+def toFSM {S : Type} -- State Variables
+    [ToString S] [BEq S] [Ord S] [StateCardinality S]
+    (p : MetaProgramGraph Nat String S)
+    (initialStates : List S)
+    (stateAP : S → List String)
+    (APList : List String)
+    : FSM Nat (APBits APList) String :=
     FSM.compactFSM <|
-        unfoldProgramGraph
-            p.toProgramGraph
-            (fun l s xs => [toString l ++ "-" ++ toString s])
-            id
-            initialStates
+        FSM.onlyReachableFSM <|
+            unfoldProgramGraph
+                p.toProgramGraph
+                (fun n s xs =>
+                    let totalAP : List String := xs ++ stateAP s
+                    listToAPBits totalAP
+                    )
+                id
+                initialStates
+
+def toFSMLabeled {S : Type} -- State Variables
+    [ToString S] [BEq S] [Ord S] [StateCardinality S]
+    (p : MetaProgramGraph Nat String S)
+    (initialStates : List S)
+    (stateAP : S → List String)
+    (APList : List String)
+    : FSM Nat (UnfoldedVertexLabel APList) String :=
+    FSM.compactFSM <|
+        FSM.onlyReachableFSM <|
+            unfoldProgramGraph
+                p.toProgramGraph
+                (fun n s xs =>
+                    let totalAP : List String := xs ++ stateAP s
+                    let AP : APBits APList := listToAPBits totalAP
+                    UnfoldedVertexLabel.mk (toString n ++ "|" ++ String.intercalate "/" (decodeAPBits AP)) AP
+                    )
+                id
+                initialStates
 
 
-def toVizAutomata (a : FSM Nat (List String) String) : Json :=
+def toVizAutomata {APList : List String} (a : FSM Nat (UnfoldedVertexLabel APList) String) : Json :=
     toJson <|
         VizGraph.toVizFSM
             (FSM.onlyReachableFSM <| a)
-            (fun vl => String.intercalate "/" vl)
+            (fun uf => uf.textLabel)
             id
             "/start"
             "/end"
+            []
 
-def toVizProgram (p : MetaProgramGraph Nat String Bool) : Json :=
+def toVizProgram (p : MetaProgramGraph Nat String SV) : Json :=
     toJson <| VizGraph.toVizProgramGraph p.toProgramGraph id
 
-/-
-def dumpArgh [HasEffect IOEffect m] : Freer m Nat := do
-    ioEff (IO.println "argh")
-    pure 4
-
-def if3 [HasEffect ProgramLabel m] [HasEffect (StateEff Bool) m] [HasEffect IOEffect m] : Nat →  Freer m Nat :=
-    fun z => do
-        put true
-        if z = 0
-        then dumpArgh
-        else do
-            put false
-            ioEff (IO.println "step")
-            label "looping"
-            if3 (z-1)
-
-def wormHoleX : Freer [ProgramLabel, StateEff Bool, IOEffect] Nat := do
-    label "start"
-    let y ← if3 3
-    let z : Bool ← @get Bool _ _
-    if z
-    then label "mid"
-    else do
-        label "false"
-        put false
-    label "end"
-    pure y
-
-def x := toVizProgram <| ProgramGraphBuilderT.build (goWormhole2 wormHoleX)
-def xf := toVizAutomata <| toFSM (ProgramGraphBuilderT.build (goWormhole2 wormHoleX)) [default]
-#widget VizGraph.vizGraph xf
-
-
-def twoSteps {m : Type → Type} [Monad m] : ProgramGraphBuilderT m (MetaProgramGraph Nat String Bool) := do
-    let p₁ ← basicStep "a"
-    let p₂ ← basicStep "b"
-    --branchProgramGraph id  "true" id p₁ not "false" id p₂
-    pure <| sequencePrograms p₁ p₂
-
-
-def prog := Id.run <| ProgramGraphBuilderT.run' (twoSteps >>= reifyFlows) { nextLocValue := 1 }
-
-#eval toJson <| toVizProgram prog
-#widget VizGraph.vizGraph (toVizAutomata <| toFSM prog)
-#widget VizGraph.vizGraph (toVizProgram prog)
--/
+def toVizUnfoldedProgram [StateCardinality StateVariables] [BEq StateVariables] [Ord StateVariables] [ToString StateVariables]
+    (p : MetaProgramGraph Nat String StateVariables)
+    (stateToAP : StateVariables → List String)
+    (relevantAP : List String) : Json :=
+    if h : StateCardinality.sSize StateVariables > 0
+    then toVizAutomata <| toFSMLabeled p [StateCardinality.genState ⟨0,h⟩] stateToAP relevantAP
+    else Json.bool false
 
 end MetaProgramGraph
