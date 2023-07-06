@@ -9,7 +9,10 @@
 --
 
 import Lean
+import Lean.Parser
 import FreerWormhole.Wormhole
+
+open Lean Elab Expr Command Meta Term MVarId
 
 -- The basic Effect type holds a type of the possible operations/commands (usually a sum type)
 -- and the appropriate return type(s) for each possible operation.
@@ -76,6 +79,8 @@ class SupportsEffect (e : Effect) (m : Type → Type 2) where
     send : (c : e.op) → m (e.ret c)
 
 end Effect
+
+
 
 
 inductive EffM (effs : List Effect) : Type → Type 2 where
@@ -172,3 +177,24 @@ instance : Pure (EffM effs) where
 
 instance : Bind (EffM effs) where
     bind := EffM.bindEff
+
+/-
+ Takes a list of required effects and adds typeclass requirements for SupportsEffect of all the effects
+ Basically it goes from:
+ -- def (defEffectful fname [e1,e2,e3]) (x:int) >| Unit := {...}
+ to
+ -- def fname
+    {m : Type → Type 2}
+    [Monad m]
+    [SupportsEffect e1 m]
+    [SupportsEffect e2 m]
+    [SupportsEffect e3 m]
+    (x : int)
+    : m Unit := {...}
+-/
+syntax "defEffectful" ident "[[" term,* "]]" bracketedBinder,* ">|" term ":=" term : command
+
+macro_rules
+| `(defEffectful $defName:ident [[ $[$e:term],* ]] $[$inp:bracketedBinder],* >| $a:term := $bdy:term) => `(def $defName {m : Type → Type 2} [Monad m] $[ [Effect.SupportsEffect $e m] ]* $[ $inp ]* : m $a := $bdy)
+
+

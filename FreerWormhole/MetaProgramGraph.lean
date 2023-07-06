@@ -11,6 +11,7 @@ import SolifugidZ.ProgramGraph
 import SolifugidZ.APBits
 import SolifugidZ.FSM
 import SolifugidZ.VizGraph
+import SolifugidZ.StutterBisimulation
 
 import FreerWormhole.Effects.EffM
 import FreerWormhole.Effects.HEffM
@@ -249,15 +250,18 @@ def intoLoop {S : Type} [Ord Action] [Inhabited Action] [Monad m]
     let pg' := newTransitions.foldl (fun g ⟨l₁,l₂⟩ => g.addTransition l₁ l₂ (fun _ => true) default id) p.toProgramGraph
     pure { p with toProgramGraph := pg' }
 
--- Since foreverUntil is partial it won't show up in the normal wormhole transformation. But we
--- know what the final graph should look like, so we still generate a program graph.
-def ForeverUntilProgramGraphProcessor : WormholeCallbacks :=
-    WormholeCallbacks.mk
-        []
-        []
-        [⟨"foreverUntil", fun args mk => do
-            let inLoop ← mk true #[] (args.get! 2)
-            `(intoLoop $(TSyntax.mk inLoop))⟩]
+-- Process a `foreverLoop` which is similar to `foreverUntil` except there is no branch and exit point
+def hardLoop {S : Type} [Ord Action] [Inhabited Action] [Monad m]
+    (p : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S))
+    : ProgramGraphBuilderT m (MetaProgramGraph Nat Action S) := do
+    let p ← p
+    let newTransitions : List (Nat × Nat) := List.join <| p.flowOut.map (fun ⟨_,n₁⟩ => p.flowIn.map (fun n₂ => ⟨n₁,n₂⟩))
+    let pg' := newTransitions.foldl (fun g ⟨l₁,l₂⟩ => g.addTransition l₁ l₂ (fun _ => true) default id) p.toProgramGraph
+    pure <|
+        { p with
+            toProgramGraph := pg'
+            flowOut := []
+        }
 
 
 /-
@@ -406,6 +410,8 @@ def concurrentPrograms [Ord Act] [Inhabited Act] [BEq Act] [Monad m] [BEq StateV
         jumpTo := RBMap.empty
     }
 
+def cTrue {a : Type} : a → Bool := fun _ => true
+
 def programGraphTransformers
     (effTransform : ProcessEffect) 
     (heffTransform : ProcessHEffect)
@@ -506,6 +512,10 @@ structure UnfoldedVertexLabel (APList : List String) : Type where
 instance : Inhabited (UnfoldedVertexLabel APList) where
     default := UnfoldedVertexLabel.mk "" APBits.empty
 
+-- when comparing UnfoldedVertexLabel we ignore the text label
+instance : Ord (UnfoldedVertexLabel APList) where
+    compare := fun a b => compare a.atomicProps b.atomicProps
+
 
 def toFSM {S : Type} -- State Variables
     [ToString S] [BEq S] [Ord S] [StateCardinality S]
@@ -514,7 +524,7 @@ def toFSM {S : Type} -- State Variables
     (stateAP : S → List String)
     (APList : List String)
     : FSM Nat (APBits APList) String :=
-    FSM.compactFSM <|
+    let baseFSM := FSM.compactFSM <|
         FSM.onlyReachableFSM <|
             unfoldProgramGraph
                 p.toProgramGraph
@@ -524,6 +534,11 @@ def toFSM {S : Type} -- State Variables
                     )
                 id
                 initialStates
+    {
+        baseFSM with
+        toLabeledGraph := StutterBisimulation.stutterBisimulationDivQuotient baseFSM.toLabeledGraph compare
+
+    }
 
 def toFSMLabeled {S : Type} -- State Variables
     [ToString S] [BEq S] [Ord S] [StateCardinality S]
@@ -532,7 +547,7 @@ def toFSMLabeled {S : Type} -- State Variables
     (stateAP : S → List String)
     (APList : List String)
     : FSM Nat (UnfoldedVertexLabel APList) String :=
-    FSM.compactFSM <|
+    let baseFSM := FSM.compactFSM <|
         FSM.onlyReachableFSM <|
             unfoldProgramGraph
                 p.toProgramGraph
@@ -543,7 +558,11 @@ def toFSMLabeled {S : Type} -- State Variables
                     )
                 id
                 initialStates
+    {
+        baseFSM with
+        toLabeledGraph := StutterBisimulation.stutterBisimulationDivQuotient baseFSM.toLabeledGraph compare
 
+    }
 
 def toVizAutomata {APList : List String} (a : FSM Nat (UnfoldedVertexLabel APList) String) : Json :=
     toJson <|

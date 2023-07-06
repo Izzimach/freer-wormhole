@@ -125,12 +125,15 @@ def ExceptionEffectSkeletonProcessor : WormholeCallbacks :=
             match forks with
             | .some v => do
                 let evals ← v.mapM (rec true #[])
+                -- some type coercions to get our Syntax to splice correctly
+                let evals : TSyntaxArray `term := evals.map TSyntax.mk
+                let evals : Syntax.TSepArray `term "," := evals
                 v.forM (fun z => logInfo <| toMessageData z)
                 --let evals : Array (TSyntax `term) := evals.map (TSyntax.mk)
                 --`("catchEff " ++ toString $(List.length v[ $evals,* ]))
                 let vLen := toString (v.size)
-                `("catchEff " ++ $(Syntax.mkStrLit vLen))
-            | .none => `("catchEff?")⟩
+                `(FreerSkeleton.HEffect "Catch" [$evals,*])
+            | .none => `("missing forks for catchEff?")⟩
         ]
         []
 

@@ -22,10 +22,11 @@ inductive FreerSkeleton (c t : Type) : Type where
 | NonDet : FreerSkeleton c t → FreerSkeleton c t → FreerSkeleton c t
 | Recursive : String → FreerSkeleton c t → FreerSkeleton c t
 | Recurse : String → FreerSkeleton c t
+| HEffect : String → List (FreerSkeleton c t) → FreerSkeleton c t
     deriving Repr
 
 
-def dumpFreerSkeleton [ToString c] [ToString t]: FreerSkeleton c t → String
+def dumpFreerSkeleton [ToString c] [ToString t] : FreerSkeleton c t → String
     | .Error e => "Error : " ++ e
     | .Empty   => "Empty"
     | .Pure x => "Pure " ++ toString x
@@ -34,6 +35,11 @@ def dumpFreerSkeleton [ToString c] [ToString t]: FreerSkeleton c t → String
     | .NonDet a b => "(" ++ dumpFreerSkeleton a ++ " || " ++ dumpFreerSkeleton b ++ ")"
     | .Recursive s r => "{{Recursive " ++ s ++ " :: " ++ dumpFreerSkeleton r ++ "}}"
     | .Recurse s => "Call Recurse //" ++ s++ "//"
+    | .HEffect s [] => s
+    | .HEffect s (h :: heffs) =>
+        let hSkeleton := dumpFreerSkeleton h
+        let heffSkeletons := dumpFreerSkeleton (FreerSkeleton.HEffect s heffs)
+        "[[" ++ hSkeleton ++ "]]" ++ heffSkeletons
 
 namespace WormholeSkeleton
 
@@ -97,9 +103,15 @@ def skeletonTransformers
             let heff := args.get! 0
             let op := args.get! 3
             let fork := args.get! 4
-            let v ← heffTransform heff op fork mk
-            `(FreerSkeleton.Command $(TSyntax.mk v))
+            heffTransform heff op fork mk
         ⟩,
+        ⟨"hSend", fun args mk => do
+            let heff := args.get! 0
+            let op := args.get! 3
+            let fork := args.get! 4
+            heffTransform heff op fork mk
+        ⟩,
+
         ⟨"bind", fun args mk => do
             let a₁ := args.get! 4
             let a₂ := args.get! 5
@@ -139,27 +151,6 @@ def pureAsIs : Expr → TermElabM Syntax := fun e =>
         let pvVar ← elabTerm pvStx (.some et)
         pvVar.mvarId!.assign e
         pure pvStx
-
--- Since foreverUntil is partial it won't show up in the normal wormhole transformation. So we
--- transform it into a loop via the recursive constructor.
-def ForeverUntilSkeletonProcessor : WormholeCallbacks :=
-    WormholeCallbacks.mk
-        []
-        []
-        [⟨"foreverUntil", fun args mk => do
-            let inLoop ← mk true #[] (args.get! 2)
-            let recVar ← mkFreshExprMVar (mkConst ``String)
-            let recId := recVar.mvarId!.name.toString
-            recVar.mvarId!.assign (mkStrLit recId)
-            -- we wrap the loop in .Recursive and some stuff onto the end after the loop:
-            --  A nonet branch that either loops back (Recurse) or drops out of the loop (pure)
-            `(FreerSkeleton.Recursive $(Syntax.mkStrLit recId)
-                (FreerSkeleton.Bind
-                    $(TSyntax.mk inLoop) 
-                    (FreerSkeleton.NonDet
-                        (FreerSkeleton.Recurse $(Syntax.mkStrLit recId))
-                        (FreerSkeleton.Pure PUnit.unit))))
-         ⟩]
 
 
 end WormholeSkeleton

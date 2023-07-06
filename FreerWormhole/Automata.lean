@@ -8,6 +8,8 @@ import SolifugidZ.Basic
 import SolifugidZ.LabeledGraph
 import SolifugidZ.FSM
 import SolifugidZ.VizGraph
+import SolifugidZ.Bisimulation
+import SolifugidZ.StutterBisimulation
 
 import FreerWormhole.Effects.EffM
 import FreerWormhole.Effects.HEffM
@@ -204,13 +206,26 @@ def reifyException (e : AltAutomata) (x : AltAutomata) (throwId : String) (excep
     }
 
 /-
-  Take a given automata and loop it by connecting end nodes to the start nodes
+  Take a given automata and loop it by connecting end nodes to the start nodes.
+  The exit nodes are left intact since a `foreverUntil` can exit the loop.
 -/
 def loopAutomata (a : AltAutomata) : AltAutomata :=
     let eGraph := a.fsm.toExplicit
     let newEdges : List (Nat × Nat) := List.join <| a.fsm.startStates.map (fun n₂ => a.fsm.endStates.map (fun n₁ => ⟨n₁,n₂⟩))
     let eGraph := newEdges.foldl (fun g ⟨n₁,n₂⟩ => LabeledGraph.addEdge g n₁ n₂ "") eGraph
     {a with fsm.toLabeledGraph := LabeledGraph.fromExplicit eGraph}
+
+-- for a forever loop, we loop back all end nodes and remove the exit/end states
+def hardLoopAutomata (a : AltAutomata) : AltAutomata :=
+    let eGraph := a.fsm.toExplicit
+    let newEdges : List (Nat × Nat) := List.join <| a.fsm.startStates.map (fun n₂ => a.fsm.endStates.map (fun n₁ => ⟨n₁,n₂⟩))
+    let eGraph := newEdges.foldl (fun g ⟨n₁,n₂⟩ => LabeledGraph.addEdge g n₁ n₂ "") eGraph
+    {
+        a with
+            fsm.toLabeledGraph := LabeledGraph.fromExplicit eGraph
+            fsm.endStates := []
+    }
+
 
 
 def automataTransformers
@@ -292,23 +307,18 @@ def buildAutomataWormhole (processors : List WormholeCallbacks) (processPure : E
             forDirect processPure)
         compare
 
-def toVizAutomata := fun a =>
+def toVizAutomata (a : AltAutomata) (aps : List String) : Json :=
+    let baseFSM := FSM.onlyReachableFSM <| AltAutomata.fsm a
+    let baseFSM := {
+        baseFSM with
+        toLabeledGraph := StutterBisimulation.stutterBisimulationDivQuotient baseFSM.toLabeledGraph (fun a b => @Bisimulation.compareLists _ aps _ a b)
+    }
     toJson <|
-        toVizFSM (FSM.onlyReachableFSM <| AltAutomata.fsm a)
+        toVizFSM baseFSM
              (fun vl => String.intercalate "/" vl)
              id
              "/start"
              "/end"
              []
-
--- Since foreverUntil is partial it won't show up in the normal wormhole transformation. But we
--- know what the final graph should look like, so we still generate a program graph.
-def ForeverUntilAutomataProcessor : WormholeCallbacks :=
-    WormholeCallbacks.mk
-        []
-        []
-        [⟨"foreverUntil", fun args mk => do
-            let inLoop ← mk true #[] (args.get! 2)
-            `(loopAutomata $(TSyntax.mk inLoop))⟩]
 
 end WormholeAutomata

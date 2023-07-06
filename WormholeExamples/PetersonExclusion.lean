@@ -11,12 +11,14 @@ import FreerWormhole.Effects.MultithreadHEffect
 
 import FreerWormhole.Wormhole
 import FreerWormhole.MetaProgramGraph
+import FreerWormhole.ForeverLoop
 
+import SolifugidZ.LTL
 import SolifugidZ.CTL
 
 open EffM HEffM Effect HEffect
 open LabelEffect SignaledStateEffect IOEffect MultithreadHEffect
-open Wormhole ProgramGraph MetaProgramGraph
+open Wormhole ProgramGraph MetaProgramGraph ForeverLoop
 open CTL
 
 structure SharedVariables : Type where
@@ -58,52 +60,39 @@ instance : StateCardinality SharedVariables where
         {lock₁ := l1, lock₂ := l2, next := next}
     
 
-def process1 
-    [Monad m]
-    [SupportsEffect (SignaledStateEffect SharedVariables) m]
-    [SupportsEffect LabelEffect m]
-    [SupportsEffect IOEffect m]
-    : m Unit :=
-    foreverUntil <| do
-        modifyState <| fun (s : SharedVariables) => { s with lock₁ := true, next := ⟨1, by simp⟩}
-        label "wait1"
-        let _ ← waitFor <| fun (s : SharedVariables) => s.lock₂ != true || s.next.val != 1
-        --liftIO <| IO.sleep 500
+defHEffectful process1 [[MultithreadHEffect !! SignaledStateEffect SharedVariables, LabelEffect, IOEffect]]
+    >| Unit :=
+    foreverLoop <| do
+        labelBlock "wait1" <| do
+            modifyState <| fun (s : SharedVariables) => { s with lock₁ := true, next := ⟨1, by simp⟩}
+            liftIO <| IO.println "wait1"
+            let _ ← waitFor <| fun (s : SharedVariables) => s.lock₂ != true || s.next.val != 1
+        labelBlock "crit1" <| do
+            liftIO <| IO.println "crit1"
+            liftIO <| IO.sleep 500
         modifyState <| fun (s : SharedVariables) => { s with lock₁ := false}
-        label "crit1"
-        pure false
 
-def process2
-    [Monad m]
-    [SupportsEffect (SignaledStateEffect SharedVariables) m]
-    [SupportsEffect LabelEffect m]
-    [SupportsEffect IOEffect m]
-    : m Unit :=
-    foreverUntil <| do
-        modifyState <| fun (s : SharedVariables) => { s with lock₂ := true, next := ⟨0, by simp⟩}
-        label "wait2"
-        let _ ← waitFor <| fun (s : SharedVariables) => s.lock₁ != true || s.next.val != 0
-        --liftIO <| IO.sleep 50
+defHEffectful process2 [[MultithreadHEffect !! SignaledStateEffect SharedVariables, LabelEffect, IOEffect]]
+    >| Unit :=
+    foreverLoop <| do
+        labelBlock "wait2" <| do
+            liftIO <| IO.println "wait2"
+            modifyState <| fun (s : SharedVariables) => { s with lock₂ := true, next := ⟨0, by simp⟩}
+            let _ ← waitFor <| fun (s : SharedVariables) => s.lock₁ != true || s.next.val != 0
+        labelBlock "crit2" <| do
+            liftIO <| IO.println "crit2"
+            liftIO <| IO.sleep 50
         modifyState <| fun (s : SharedVariables) => { s with lock₂ := false}
-        label "crit2"
-        pure false
 
 
-def startAndFork
-    [Monad m]
-    [SupportsHEffect MultithreadHEffect m]
-    [SupportsEffect (SignaledStateEffect SharedVariables) m]  
-    [SupportsEffect LabelEffect m]
-    [SupportsEffect IOEffect m] 
-    : m Unit := do
+defHEffectful startAndFork [[MultithreadHEffect  !! SignaledStateEffect SharedVariables, LabelEffect, IOEffect]]
+    >| Unit := do
     label "fork"
-    forkThreads [process2, process1]
+    forkThreads [process1, process2]
 
-def interpreter
-    (mtx : IO.Mutex SharedVariables)
-    (cv : IO.Condvar)
+def interpreter (mtx : IO.Mutex SharedVariables) (cv : IO.Condvar)
     : EffM [SignaledStateEffect SharedVariables, LabelEffect, IOEffect] PUnit → IO Unit := fun p =>
-    runIO <| runLabelEffect <| runSignaledStateMutex mtx cv p
+    runIO <| runLabelEffect <| runSignaledStateMutex mtx cv <| p
 
 
 def elaborator (mtx : IO.Mutex SharedVariables) (cv : IO.Condvar)
@@ -132,7 +121,7 @@ genWormhole2 genPG >: buildProgramGraphWormhole
         LabelEffectProgramGraphProcessor,
         SignaledStateEffectProgramGraphProcessor,
         MultithreadHEffectProgramGraphProcessor,
-        ForeverUntilProgramGraphProcessor
+        ForeverLoopProgramGraphProcessor
     ]
     -- pure processor
     programGraphPure
@@ -151,8 +140,12 @@ def zedFSM : FSM Nat (APBits ["wait1","wait2","crit1","crit2","finish"]) String 
     toFSM zed [SharedVariables.mk false false ⟨0,by simp⟩] StateToAP ["wait1","wait2","crit1","crit2","finish"]
 
 
-#eval checkUsingCTL zedFSM [ctl ∀◇<+"wait1"+>]
-#eval checkUsingCTL zedFSM [ctl ∀□∃◇<+"finish"+>]
-#eval checkUsingCTL zedFSM [ctl ∀◇<+"wait1"+>∨<+"wait2"+>]
-#eval checkUsingCTL zedFSM [ctl ∀□(<+"wait1"+> → ∀◇<+"crit1"+>)]
+--#eval checkUsingCTL zedFSM [ctl ∀□¬(<+"crit1"+> ∧ <+"crit2"+>)]
+--#eval checkUsingCTL zedFSM [ctl ∀◇<+"wait1"+>]
+--#eval checkUsingCTL zedFSM [ctl ∀□∃◇<+"finish"+>]
+--#eval checkUsingCTL zedFSM [ctl ∀◇<+"wait1"+>∨<+"wait2"+>]
+--#eval checkUsingCTL zedFSM [ctl ∀□(<+"wait1"+> → ∀◇<+"crit1"+>)]
+#eval checkUsingCTL zedFSM [ctl ∀□¬(<+"crit1"+> ∧ <+"crit2"+>)]
+
+--#widget VizGraph.vizGraph (toJson <| VizGraph.vizLTLTest zedFSM [ [ltl □◇<+"wait1"+> → □◇<+"crit1"+>], [ltl □¬(<+"crit1"+> ∧ <+"crit2"+>)], [ltl ◇<+"wait1"+>] ])
 

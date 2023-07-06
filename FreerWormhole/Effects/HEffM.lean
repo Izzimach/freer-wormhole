@@ -50,6 +50,8 @@ def weakenHOU {heff : HEffect} {heffs : List HEffect} : HOU heffs r x → HOU (h
 class HasHEffect (heff : HEffect) (heffs : List HEffect) where
     ixOf : PSigma (fun (ix : Fin heffs.length) => heffs[ix] = heff)
 
+class SupportsHEffect (heff : HEffect) (m : Type → Type 2) where
+    hSend : (c : heff.cmd) → (hfork : (x : Effect.op (HEffect.fork heff c)) → m (Effect.ret (HEffect.fork heff c) x)) → m (heff.retH c)
 
 instance : HasHEffect heff (heff :: heffs) where
     ixOf := PSigma.mk ⟨0,by simp; apply Nat.zero_lt_succ⟩ (by rfl)
@@ -59,6 +61,7 @@ instance [HasHEffect heff heffs] : HasHEffect heff (z :: heffs) where
             let ix1 : Fin (List.length (z :: heffs)) := Fin.succ ix0
             have h4 : (z :: heffs)[ix1] = heffs[ix0] := by rfl
             PSigma.mk ix1 (by simp; rw [h4]; exact h0)
+
 
 def inject {heff : HEffect} {heffs : List HEffect} [HasHEffect heff heffs] (c : heff.cmd) : HOU heffs (heff.retH c) (heff.fork c) :=
     let ix := HasHEffect.ixOf
@@ -95,9 +98,6 @@ def hLift {heff : HEffect} {heffs : List HEffect} [HasHEffect heff heffs]
     HEffM.Impure (@HEffect.inject heff heffs _ c) hfork (fun z => HEffM.Pure z)
 
 -- A version of `SupportsEffect` for HEffects
-class SupportsHEffect (heff : HEffect) (m : Type → Type 2) where
-    hSend : (c : heff.cmd) → (hfork : (x : Effect.op (HEffect.fork heff c)) → m (Effect.ret (HEffect.fork heff c) x)) → m (heff.retH c)
-
 instance [HasHEffect heff heffs] : SupportsHEffect heff (HEffM heffs) where
     hSend := fun c hf => @hLift heff heffs _ c hf
 
@@ -183,3 +183,9 @@ def elabNil : Elaboration [hLifted NilEffect] [] :=
 
 
 end HEffM
+
+syntax "defHEffectful" ident "[[" term,* "!!" term,* "]]" bracketedBinder,* ">|" term ":=" term : command
+
+macro_rules
+| `(defHEffectful $defName:ident [[ $[$he:term],* !! $[$e:term],* ]] $[$inp:bracketedBinder],* >| $a:term := $bdy:term) => `(def $defName {m : Type → Type 2} [Monad m] $[ [HEffect.SupportsHEffect $he m] ]* $[ [Effect.SupportsEffect $e m] ]* $[ $inp ]* : m $a := $bdy)
+

@@ -163,6 +163,9 @@ def StateEffectProgramGraphProcessor : WormholeCallbacks :=
     WormholeCallbacks.mk
         [⟨"StateEffect", effSyntaxMode `(fun (op : Type 1) (c : StateOp _) => StateProcessor c)⟩]
         []
-        [⟨"stateIf", stateIfProcessor⟩, ⟨"foreverUntilState", foreverUntilStateProcessor⟩]
+        [
+            ⟨"stateIf", stateIfProcessor⟩,
+            ⟨"foreverUntilState", foreverUntilStateProcessor⟩
+        ]
 
 end StateEffect

@@ -9,6 +9,7 @@ import FreerWormhole.Effects.LabelEffect
 import FreerWormhole.Effects.IOEffect
 import FreerWormhole.Effects.StateEffect
 import FreerWormhole.Effects.ExceptionEffect
+import FreerWormhole.ForeverLoop
 
 --
 -- some test monads
@@ -18,7 +19,7 @@ open Lean Elab Term
 
 open Wormhole WormholeSkeleton
 
-open EffM Effect HEffM HEffect
+open EffM Effect HEffM HEffect ForeverLoop
 
 open LabelEffect IOEffect StateEffect ExceptionEffect
 
@@ -31,9 +32,10 @@ def dumpArgh [Monad m] [SupportsEffect IOEffect m] : m Nat := do
     pure 4
 
 
-def wormHoleX : EffM [LabelEffect, IOEffect] Nat := do
+def wormHoleX : HEffM [LabelWrapHEffect, hLifted LabelEffect, hLifted IOEffect]  Nat := do
     let z ← noop3
-    if z < 3
+    labelBlock "branching" <|
+        if z < 3
         then dumpArgh
         else pure 3
 
@@ -44,7 +46,7 @@ genWormhole2 skel >: buildSkeletonWormhole
         IOEffectSkeletonProcessor,
         StateEffectSkeletonProcessor,
         ExceptionEffectSkeletonProcessor,
-        ForeverUntilSkeletonProcessor
+        ForeverLoopSkeletonProcessor
     ]
     -- pure processor
     pureUnit
@@ -52,11 +54,10 @@ genWormhole2 skel >: buildSkeletonWormhole
 
 #check goWormhole2 (pure 3)
 #check goWormhole2 (noop3 : EffM [LabelEffect] Nat)  --wormHoleX.{0}
-#reduce goWormhole2 wormHoleX
 
 def x : FreerSkeleton String Unit := goWormhole2 wormHoleX
 
-#reduce x
+#eval x
 
 --#eval goWormhole2 wormHoleX
 
@@ -75,14 +76,7 @@ def transact
         (do put 3)
     get
 
-def transact2
-    {m : Type → Type 2}
-    [Monad m]
-    [SupportsEffect (StateEffect Nat) m]
-    [SupportsEffect (ThrowEffect String) m]
-    [SupportsHEffect (ExceptionHEffect (onlyRet Unit)) m]
-      : m Nat :=
-    do
+defHEffectful transact2 [[ExceptionHEffect (onlyRet Unit) !! StateEffect Nat, ThrowEffect String]] >| Nat := do
     put 1
     catchH
         (do put 2; throwEff "argh")
@@ -97,9 +91,7 @@ def m2 : Type 2 := HEffM [ExceptionHEffect (onlyRet Unit), hLifted (ThrowEffect 
 
 #check goWormhole2 (transact2 : m2)
 
-def xW : FreerSkeleton String Unit := goWormhole2 (transact2 : m2)
-
-#eval xW
+#eval (goWormhole2 (transact2 : m2) : FreerSkeleton String Unit)
 
 
 

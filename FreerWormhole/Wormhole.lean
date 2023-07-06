@@ -297,7 +297,7 @@ def dispatchHEffectProcessor : List (String × ProcessHEffect) → ProcessHEffec
     | _ => `("heffX error")
 
 def stripLambda : Expr → Expr
-    | .lam n arg b bi => b 
+    | .lam n nt b bi => b 
     | e@_ => e
 
 partial
@@ -326,9 +326,9 @@ def unfoldListExpr (e : Expr) : MetaM (List Expr) := do
 
 
 -- Try to "unfold" the fork element of a Hefy data element.
--- We for two forms : (fun x => match with |a => ... | b => ...) and (fun ix => [a,b,c][ix])
--- If it's neither of these the function returns .none
-def unfoldFork (e : Expr) : MetaM (Option (Array Expr)) :=
+-- We check for two forms : (fun x => match with |a => ... | b => ...) and (fun ix => [a,b,c][ix])
+-- If it's neither of these then we assume there is just one branch and return the whole lambda body as that a single branch.
+def unfoldFork (e : Expr) : TermElabM (Option (Array Expr)) := do
     let x := stripLambda e
     if x.isApp
     then do
@@ -356,18 +356,9 @@ def unfoldFork (e : Expr) : MetaM (Option (Array Expr)) :=
                 logInfo <| args
                 let branches ← unfoldListExpr <| args.toList.getD 1 (mkStrLit "error")
                 pure <| .some (List.toArray branches)
-            else pure <| .none    
-        | .none => pure <| .none
-    else pure .none
-
-
--- An endless loop - this is partial so the elaborator will hide it behind an `opaque` Expr,
--- but we can write a transformer specifically for foreverUntil that knows how to build the correct
--- FSM or other final data structure.
-partial
-def foreverUntil [Monad m] (mainLine : m Bool) : m Unit := do
-    if (← mainLine)
-    then pure ()
-    else foreverUntil mainLine
+            else pure <| Array.singleton x    
+        | .none => pure <| Array.singleton x
+    else pure <| Array.singleton x
+         
 
 end Wormhole

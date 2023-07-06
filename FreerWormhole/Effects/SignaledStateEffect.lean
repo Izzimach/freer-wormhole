@@ -78,7 +78,7 @@ def signaledStateHandler {s : Type} (mtx : IO.Mutex s) (cv : IO.Condvar) [HasEff
                     next (show _ by rw [←h]; exact s) ()
     }
 
--- Runs SignaledStateEffect with the provided initial state put into a Mutex. At the end returns the result as wel
+-- Runs SignaledStateEffect with the provided initial state put into a Mutex. At the end returns the result as well
 -- as the final state stored in the Mutex.
 def runSignaledState {s x : Type} (init : s) [HasEffect IOEffect effs] : EffM (SignaledStateEffect s :: effs) x → EffM effs (x × s) :=
     fun m => do
